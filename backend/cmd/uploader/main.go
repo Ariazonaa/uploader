@@ -29,7 +29,9 @@ import (
 	"uploader/internal/web"
 )
 
-const version = "uploader dev"
+// version is set at build time (-ldflags "-X main.version=1.2.3"; the Docker
+// build passes its VERSION build arg); plain `go build` reports "dev".
+var version = "dev"
 
 func main() {
 	cmd := "serve"
@@ -52,7 +54,7 @@ func main() {
 	case "healthcheck":
 		err = runHealthcheck()
 	case "version", "-v", "--version":
-		fmt.Println(version)
+		fmt.Println("uploader " + version)
 	case "help", "-h", "--help":
 		usage()
 	default:

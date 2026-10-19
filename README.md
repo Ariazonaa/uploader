@@ -7,19 +7,40 @@
 [![CI](https://github.com/ariazonaa/uploader/actions/workflows/ci.yml/badge.svg)](https://github.com/ariazonaa/uploader/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go version](https://img.shields.io/github/go-mod/go-version/ariazonaa/uploader?filename=backend%2Fgo.mod)](backend/go.mod)
+[![Release](https://img.shields.io/github/v/release/ariazonaa/uploader)](https://github.com/ariazonaa/uploader/releases/latest)
 [![Image](https://img.shields.io/badge/ghcr.io-ariazonaa%2Fuploader-2496ED?logo=docker&logoColor=white)](https://github.com/ariazonaa/uploader/pkgs/container/uploader)
 
 English | [Deutsch](README.de.md)
 
 </div>
 
-<!-- screenshot: docs/screenshot.png -->
+<p align="center">
+  <img src="docs/screenshots/dashboard.webp" alt="Dashboard with uploaded photos, stats and filters" width="900">
+</p>
 
 Uploader is a Zipline-style upload server. Point ShareX (or curl, Flameshot, or any
 HTTP client) at it, or drag files into the web dashboard, and get back a short link
 that unfurls nicely in Discord, Slack, Mastodon and friends. The Go backend serves the
 JSON API, the public share pages and the embedded React dashboard from a single binary,
 with PostgreSQL as its only dependency.
+
+<p align="center">
+  <a href="#quick-start-docker-compose"><b>Quick start</b></a> ·
+  <a href="#features"><b>Features</b></a> ·
+  <a href="#screenshots"><b>Screenshots</b></a> ·
+  <a href="#sharex-and-the-api"><b>ShareX & API</b></a> ·
+  <a href="#configuration"><b>Configuration</b></a> ·
+  <a href="#development"><b>Development</b></a>
+</p>
+
+## Highlights
+
+- 🚀 **One container, one database.** A single Go binary serves the API, the share pages and the dashboard. No Redis, no queue server.
+- 📤 **Upload any way you like.** Drag and drop, paste, folders, ShareX, curl, resumable tus uploads for big files.
+- 🔗 **Links that embed.** OpenGraph, Twitter cards, oEmbed and real file extensions, so links unfurl in Discord, Slack and Mastodon.
+- 🛡️ **Private by default.** EXIF/GPS stripping, optional at-rest encryption, 2FA, a strict CSP and a container that drops root.
+- 👥 **Made for small groups.** Invite-only accounts, an admin role, API tokens, an audit log and a trash with restore.
+- 🎬 **Media done right.** Thumbnails, video posters and adaptive HLS streaming with MP4 fallback.
 
 ## Features
 
@@ -76,6 +97,29 @@ with PostgreSQL as its only dependency.
 - Tunable connection pool and an optional read replica for read-heavy queries;
   sessions live in the database, so several instances can share one database.
 - OpenAPI 3 specification with a built-in, offline Swagger UI.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/share.webp" alt="Public share page"><br><sub><b>Share page</b> — what the people you send a link to see, with OpenGraph tags for rich embeds.</sub></td>
+    <td width="50%"><img src="docs/screenshots/lightbox.webp" alt="Lightbox preview in the dashboard"><br><sub><b>Lightbox</b> — full-size preview straight from the dashboard.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/profile.webp" alt="Profile with statistics, achievements and upload heatmap"><br><sub><b>Profile</b> — upload statistics, achievements and a yearly activity heatmap.</sub></td>
+    <td><img src="docs/screenshots/settings-embeds.webp" alt="Admin settings with Discord embed preview"><br><sub><b>Settings</b> — embed templates with a live Discord preview; all runtime settings live in the dashboard.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/traffic.webp" alt="Traffic statistics by referrer and client"><br><sub><b>Traffic</b> — where views come from, by referrer and client type.</sub></td>
+    <td align="center">
+      <img src="docs/screenshots/mobile-dashboard.webp" alt="Dashboard on a phone" width="45%">
+      <img src="docs/screenshots/mobile-share.webp" alt="Share page on a phone" width="45%"><br>
+      <sub><b>Mobile</b> — the dashboard and share pages work on phones too.</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>Demo photos from <a href="https://unsplash.com">Unsplash</a> via <a href="https://picsum.photos">Lorem Picsum</a>.</sub>
 
 ## Quick start (Docker Compose)
 

@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react";
 import type { DayCount } from "../lib/api/types";
 import { bucketLevel, dayKey, HEATMAP_WEEKS } from "../lib/activity";
 import { useI18n } from "../lib/i18n/context";
@@ -29,6 +30,13 @@ export function Heatmap({
   endDate?: Date;
 }) {
   const { lang, t, tn } = useI18n();
+  // The grid is wider than narrow cards; start scrolled to the newest week
+  // (today), not the oldest, which is where the activity a user cares about is.
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [weeks]);
   // Date formatters follow the active UI language (was hardcoded en-GB).
   const humanDate = new Intl.DateTimeFormat(lang, { day: "numeric", month: "short", year: "numeric" });
   const monthShort = new Intl.DateTimeFormat(lang, { month: "short" });
@@ -81,7 +89,7 @@ export function Heatmap({
   const weekdayLabels = [t("heatmap.mon"), "", t("heatmap.wed"), "", t("heatmap.fri"), "", ""];
 
   return (
-    <div className="overflow-x-auto">
+    <div ref={scroller} className="overflow-x-auto">
       <div className="inline-flex min-w-max flex-col gap-1">
         {/* Month labels aligned to their columns (left gutter matches the grid). */}
         <div className="flex gap-1" aria-hidden="true">

@@ -7,13 +7,16 @@
 [![CI](https://github.com/ariazonaa/uploader/actions/workflows/ci.yml/badge.svg)](https://github.com/ariazonaa/uploader/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go version](https://img.shields.io/github/go-mod/go-version/ariazonaa/uploader?filename=backend%2Fgo.mod)](backend/go.mod)
+[![Release](https://img.shields.io/github/v/release/ariazonaa/uploader)](https://github.com/ariazonaa/uploader/releases/latest)
 [![Image](https://img.shields.io/badge/ghcr.io-ariazonaa%2Fuploader-2496ED?logo=docker&logoColor=white)](https://github.com/ariazonaa/uploader/pkgs/container/uploader)
 
 [English](README.md) | Deutsch
 
 </div>
 
-<!-- screenshot: docs/screenshot.png -->
+<p align="center">
+  <img src="docs/screenshots/dashboard.webp" alt="Dashboard mit hochgeladenen Fotos, Statistiken und Filtern" width="900">
+</p>
 
 Uploader ist ein Upload-Server im Stil von Zipline. Dateien kommen per ShareX, curl,
 Flameshot oder einem beliebigen HTTP-Client herein oder werden einfach ins
@@ -21,6 +24,24 @@ Web-Dashboard gezogen. Zurück gibt es einen kurzen Link, der in Discord, Slack,
 Mastodon und Co. eine saubere Vorschau erzeugt. Das Go-Backend liefert JSON-API,
 öffentliche Share-Seiten und das eingebettete React-Dashboard aus einem einzigen
 Binary aus. Die einzige Abhängigkeit ist PostgreSQL.
+
+<p align="center">
+  <a href="#schnellstart-docker-compose"><b>Schnellstart</b></a> ·
+  <a href="#funktionen"><b>Funktionen</b></a> ·
+  <a href="#screenshots"><b>Screenshots</b></a> ·
+  <a href="#sharex-und-api"><b>ShareX & API</b></a> ·
+  <a href="#konfiguration"><b>Konfiguration</b></a> ·
+  <a href="#entwicklung"><b>Entwicklung</b></a>
+</p>
+
+## Auf einen Blick
+
+- 🚀 **Ein Container, eine Datenbank.** Ein einziges Go-Binary liefert API, Share-Seiten und Dashboard. Kein Redis, kein Queue-Server.
+- 📤 **Hochladen, wie du willst.** Drag & Drop, Einfügen aus der Zwischenablage, ganze Ordner, ShareX, curl und fortsetzbare tus-Uploads für große Dateien.
+- 🔗 **Links mit Vorschau.** OpenGraph, Twitter-Cards, oEmbed und echte Dateiendungen, damit Links in Discord, Slack und Mastodon schön aufklappen.
+- 🛡️ **Privat ab Werk.** EXIF-/GPS-Entfernung, optionale Verschlüsselung der gespeicherten Dateien, 2FA, eine strikte CSP und ein Container, der root abgibt.
+- 👥 **Für kleine Gruppen gemacht.** Konten nur auf Einladung, Admin-Rolle, API-Tokens, Audit-Log und ein Papierkorb mit Wiederherstellen.
+- 🎬 **Medien richtig gemacht.** Thumbnails, Video-Vorschaubilder und adaptives HLS-Streaming mit MP4-Fallback.
 
 ## Funktionen
 
@@ -81,6 +102,29 @@ Binary aus. Die einzige Abhängigkeit ist PostgreSQL.
   Datenbank teilen.
 - OpenAPI-3-Spezifikation mit eingebauter Swagger UI, die ohne Internetzugang
   funktioniert.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/share.webp" alt="Öffentliche Share-Seite"><br><sub><b>Share-Seite</b> — das sehen die Leute, denen du einen Link schickst, mit OpenGraph-Tags für Vorschauen.</sub></td>
+    <td width="50%"><img src="docs/screenshots/lightbox.webp" alt="Lightbox-Vorschau im Dashboard"><br><sub><b>Lightbox</b> — Vollbild-Vorschau direkt aus dem Dashboard.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/profile.webp" alt="Profil mit Statistiken, Erfolgen und Upload-Heatmap"><br><sub><b>Profil</b> — Upload-Statistiken, Erfolge und eine Jahres-Heatmap.</sub></td>
+    <td><img src="docs/screenshots/settings-embeds.webp" alt="Admin-Einstellungen mit Discord-Embed-Vorschau"><br><sub><b>Einstellungen</b> — Embed-Vorlagen mit Live-Vorschau für Discord; alle Laufzeit-Einstellungen liegen im Dashboard.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/traffic.webp" alt="Traffic-Statistik nach Referrer und Client"><br><sub><b>Traffic</b> — woher die Aufrufe kommen, nach Referrer und Client-Typ.</sub></td>
+    <td align="center">
+      <img src="docs/screenshots/mobile-dashboard.webp" alt="Dashboard auf dem Handy" width="45%">
+      <img src="docs/screenshots/mobile-share.webp" alt="Share-Seite auf dem Handy" width="45%"><br>
+      <sub><b>Mobil</b> — Dashboard und Share-Seiten funktionieren auch auf dem Handy.</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>Screenshots auf Englisch; die Oberfläche gibt es auch auf Deutsch. Demo-Fotos von <a href="https://unsplash.com">Unsplash</a> über <a href="https://picsum.photos">Lorem Picsum</a>.</sub>
 
 ## Schnellstart (Docker Compose)
 

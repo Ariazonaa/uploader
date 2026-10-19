@@ -33,6 +33,7 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS backend
 ARG TARGETOS=linux
 ARG TARGETARCH
+ARG VERSION=dev
 WORKDIR /app/backend
 COPY backend/go.mod backend/go.sum* ./
 COPY backend/ ./
@@ -42,7 +43,7 @@ COPY backend/ ./
 # Replace the placeholder SPA with the freshly built assets, then compile.
 RUN rm -rf internal/web/dist
 COPY --from=frontend /app/frontend/dist ./internal/web/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o /uploader ./cmd/uploader
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X main.version=${VERSION}" -o /uploader ./cmd/uploader
 
 # --- Stage 3: runtime -------------------------------------------------------
 FROM alpine:3.24
