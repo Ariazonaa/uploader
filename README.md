@@ -326,7 +326,7 @@ uploader version
 
 ## Development
 
-Prerequisites: **Go 1.26**, **Node.js 22** and **PostgreSQL 13+** (the Compose file's
+Prerequisites: **Go 1.27**, **Node.js 22+** and **PostgreSQL 13+** (the Compose file's
 `postgres` service works fine).
 
 Use two terminals:

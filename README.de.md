@@ -340,7 +340,7 @@ uploader version
 
 ## Entwicklung
 
-Voraussetzungen: **Go 1.26**, **Node.js 22** und **PostgreSQL 13+** (der
+Voraussetzungen: **Go 1.27**, **Node.js 22+** und **PostgreSQL 13+** (der
 `postgres`-Dienst aus der Compose-Datei reicht).
 
 Mit zwei Terminals:

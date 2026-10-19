@@ -13,7 +13,7 @@ well-scoped features are welcome.
 
 ## Development setup
 
-You need Go 1.26, Node.js 22 and PostgreSQL 13+ (or Docker for the database).
+You need Go 1.27, Node.js 22 or newer and PostgreSQL 13+ (or Docker for the database).
 
 ```sh
 # 1. Database

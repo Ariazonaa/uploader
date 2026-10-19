@@ -1,28 +1,30 @@
+# Security updates only. Routine version bumps are done in the upstream
+# repository and arrive here with the next sync, so version-update PRs against
+# this repository could never be merged as-is. open-pull-requests-limit: 0
+# turns version updates off; Dependabot security updates (enabled in the
+# repository settings) are not affected by it.
 version: 2
 updates:
   - package-ecosystem: gomod
     directory: /backend
     schedule:
       interval: weekly
-    groups:
-      go-dependencies:
-        patterns: ["*"]
+    open-pull-requests-limit: 0
 
   - package-ecosystem: npm
     directory: /frontend
     schedule:
       interval: weekly
-    groups:
-      npm-dependencies:
-        patterns: ["*"]
-        update-types: [minor, patch]
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
