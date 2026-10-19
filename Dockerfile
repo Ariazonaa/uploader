@@ -30,7 +30,7 @@ RUN npm run build
 # binary), the floating tag was still on 1.26.5, and the official golang images
 # set GOTOOLCHAIN=local -- so Go does NOT auto-download the newer toolchain to
 # rescue the build, it just fails. Bump this together with go.mod.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS backend
 ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
