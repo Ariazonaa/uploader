@@ -1,0 +1,162 @@
+# Production stack. Pulls the prebuilt image -- nothing is built here. For a
+# local build see docker-compose.build.yml, for local development
+# docker-compose.dev.yml.
+#
+#   cp .env.example .env   # then fill in the required values
+#   docker compose pull && docker compose up -d
+#
+# The app publishes no host port: it is meant to sit behind a reverse proxy
+# (see deploy/nginx/example.conf), which reaches it on its fixed address in the
+# network below.
+
+networks:
+  uploader:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${UPLOADER_SUBNET:-10.89.0.40/29}
+          gateway: ${UPLOADER_GATEWAY:-10.89.0.41}
+
+volumes:
+  # Writable /tmp despite the read-only root filesystem. Deliberately a volume
+  # and not a tmpfs: the upload spool (up to the maximum upload size), video
+  # scratch files and the HLS output land here, and they belong on disk, not in
+  # RAM. HLS output is capped at 2 GiB per transcode while it runs (ffmpeg's -fs
+  # has no effect on the HLS muxer). Leftovers from a crash or OOM kill
+  # ("uploader-*", older than 6 h) are removed by the janitor.
+  uploader-tmp:
+
+services:
+  app:
+    image: ${UPLOADER_IMAGE:-ghcr.io/ariazonaa/uploader}:${UPLOADER_TAG:-latest}
+    restart: unless-stopped
+    # No host port: reachable only through the reverse proxy. If you publish
+    # the port directly, set UPLOADER_TRUST_PROXY=false -- otherwise every
+    # client can pick its own IP via X-Forwarded-For.
+    #    ports:
+    #      - "8080:8080"
+
+    # List form on purpose: "KEY=value" sets a variable, a bare "KEY" only
+    # passes it through when it is set in .env. config.go reads with
+    # os.LookupEnv, so an empty value would override the built-in default
+    # instead of leaving it alone (UPLOADER_HTTP_ADDR="" would listen on :80).
+    environment:
+      # --- Required -----------------------------------------------------------
+      # `:?` makes `compose up` fail immediately with a clear message instead of
+      # starting a container that dies on the missing key.
+      - UPLOADER_SESSION_HASH_KEY=${UPLOADER_SESSION_HASH_KEY:?set in .env - openssl rand -hex 32}
+      - UPLOADER_SESSION_BLOCK_KEY=${UPLOADER_SESSION_BLOCK_KEY:?set in .env - openssl rand -hex 32, a different value than HASH_KEY}
+      - UPLOADER_DATABASE_URL=postgres://uploader:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/uploader?sslmode=disable
+
+      # --- Fixed by this stack ------------------------------------------------
+      - UPLOADER_STORAGE_FILE_ROOT=/data/files
+      - UPLOADER_SECURE_COOKIES=${UPLOADER_SECURE_COOKIES:-true}
+      # This stack publishes no host port, so it always sits behind the proxy.
+      # With false every request would appear to come from the proxy's IP and
+      # the per-IP limiters would collapse into one instance-wide bucket: five
+      # failed logins by anyone would lock the login for everybody.
+      - UPLOADER_TRUST_PROXY=${UPLOADER_TRUST_PROXY:-true}
+
+      # --- Optional: only passed through when set in .env ---------------------
+      - UPLOADER_ENCRYPTION_KEY
+      - UPLOADER_CLIENT_IP_HEADER
+      - UPLOADER_REGISTRATION
+      - UPLOADER_VAPID_PUBLIC_KEY
+      - UPLOADER_VAPID_PRIVATE_KEY
+      - UPLOADER_VAPID_SUBJECT
+      - UPLOADER_SESSION_TTL
+      - UPLOADER_SLUG_LENGTH
+      - UPLOADER_DATABASE_REPLICA_URL
+      - UPLOADER_DB_MAX_CONNS
+      - UPLOADER_DB_MIN_CONNS
+      - UPLOADER_DB_MAX_CONN_LIFETIME
+      - UPLOADER_DB_MAX_CONN_IDLE_TIME
+      # Only for `docker compose exec app uploader user create`.
+      - UPLOADER_SEED_PASSWORD
+
+      # --- Go runtime ---------------------------------------------------------
+      # Soft heap target below mem_limit (~75 %), so the GC works harder before
+      # the kernel OOM killer steps in. Change it together with mem_limit.
+      - GOMEMLIMIT=1536MiB
+
+    volumes:
+      - ./data/files:/data/files
+      - uploader-tmp:/tmp
+
+    # The process starts as root, chowns the mounted data directory and then
+    # drops to uid 10001 (dropPrivileges). These five capabilities are exactly
+    # what that needs -- everything else is dropped.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN # os.Root.Lchown on the blobs
+      - DAC_OVERRIDE # write into a root-owned bind mount before the chown
+      - FOWNER # change the owner of files owned by someone else
+      - SETUID # syscall.Setuid(10001)
+      - SETGID # syscall.Setgid(10001)
+    security_opt:
+      # The drop uses setuid(2) inside the running process, not a setuid
+      # binary, so no-new-privileges does not interfere -- and it closes the
+      # way back up.
+      - no-new-privileges:true
+    # The root filesystem stays immutable; only the two volumes are written.
+    read_only: true
+
+    # On SIGTERM the server drains for up to 15 s. Compose's default is 10 s
+    # before SIGKILL, which would cut running uploads off mid-write.
+    stop_grace_period: 20s
+
+    # Without this the json-file driver grows until the disk is full.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # Starting values, not laws of nature. Image workers follow the CPU limit
+    # (GOMAXPROCS honours the container's quota), concurrent decodes share a
+    # fixed memory budget, and HLS transcodes run one at a time -- they are the
+    # most expensive thing the service does. A mem_limit set too low still
+    # means an OOM kill mid-transcode; keep GOMEMLIMIT above in step.
+    mem_limit: 2g
+    cpus: 2.0
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      uploader:
+        ipv4_address: ${UPLOADER_APP_IP:-10.89.0.42}
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: uploader
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set in .env}"
+      POSTGRES_DB: uploader
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+
+    # Deliberately NOT hardened with cap_drop/read_only: the official Postgres
+    # image switches users and permissions on start, and a guessed capability
+    # list could keep the database from coming back up after a restart. The
+    # container sits on an internal network with no host port anyway.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    mem_limit: 1g
+
+    networks:
+      uploader:
+        ipv4_address: ${UPLOADER_POSTGRES_IP:-10.89.0.43}
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uploader -d uploader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

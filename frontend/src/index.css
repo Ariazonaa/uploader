@@ -1,0 +1,173 @@
+@import "tailwindcss";
+
+@theme {
+  /* Color tokens — AMOLED: every surface is true black so OLED pixels stay
+     off; hierarchy comes from hairline borders, not tint, blur or shadow. */
+  --color-bg: #000000;
+  --color-surface: #000000;
+  --color-border: #1f1f1f;
+  --color-border-strong: #2a2a2a; /* hover / emphasis */
+  --color-text: #f3f3f6;
+  --color-muted: #c3c3cf;
+  /* #5a63f5 clears WCAG AA both ways: white text on it ≈4.6:1, the accent
+     as text on black ≈4.5:1 (the former #6470ff gave white only ≈4:1). */
+  --color-accent: #5a63f5;
+  --color-accent-soft: #5a63f52e;
+  /* Status colours. The plain tokens are for text/icons on the black
+     surfaces (green ≈11:1, red ≈7.9:1); the -fill ones are backgrounds
+     under white text and clear WCAG AA (green-700 ≈5:1, rose-600 ≈4.7:1 —
+     the former white-on-green-600 toast was only ≈3.2:1). */
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --color-success-fill: #15803d;
+  --color-danger-fill: #e11d48;
+
+  /* Radius scale — generous, iOS-like continuous rounding */
+  --radius-card: 1.5rem;
+  --radius-control: 0.875rem;
+
+  /* Type scale */
+  --text-meta: 0.75rem;
+}
+
+html {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", system-ui, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* --- AMOLED surfaces ---------------------------------------------------- */
+
+/* In the components layer so Tailwind utilities on the same element
+   (border-dashed, hover:bg-*, focus:border-*, ring-*) still win. */
+@layer components {
+  /* Opaque black panel with a hairline border. Radius is set by the caller
+     so cards, bars and pills can each choose one. */
+  .panel {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+  }
+
+  /* Control surface for inputs, selects and pill buttons. */
+  .control {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+  }
+
+  /* Solid accent / danger fills for primary and destructive buttons. The
+     transparent border keeps them the same size as bordered controls. */
+  .fill-accent {
+    background: var(--color-accent);
+    border: 1px solid transparent;
+  }
+  .fill-danger {
+    background: var(--color-danger-fill);
+    border: 1px solid transparent;
+  }
+
+  /* --- Micro-interactions ---------------------------------------------- */
+  .card-lift {
+    transition:
+      transform 0.18s ease,
+      border-color 0.18s ease;
+  }
+  .card-lift:hover {
+    transform: translateY(-3px);
+    border-color: var(--color-border-strong);
+  }
+}
+
+/* Keyboard focus stays clearly visible on the black surfaces. */
+:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--color-accent) 80%, white);
+  outline-offset: 2px;
+}
+
+/* Swagger UI's own dark theme (enabled by pages/docs.tsx via html.dark-mode)
+   paints the page and its root #1c2022. Keep the page AMOLED black and let the
+   docs card show through; the selectors outrank swagger-ui.css, which is
+   injected later at runtime. Its operation blocks keep their own tints. */
+html.dark-mode:root {
+  background: var(--color-bg);
+}
+#swagger-ui .swagger-ui {
+  background: transparent;
+}
+#swagger-ui .swagger-ui .scheme-container {
+  background: transparent;
+  box-shadow: none;
+  border-block: 1px solid var(--color-border);
+}
+
+/* Responsive masonry (Pinterest-style) for the grid view. CSS columns keep
+   variable-height cards tightly packed; cards opt out of column breaks. */
+.masonry {
+  column-gap: 1rem;
+  columns: 2;
+}
+@media (min-width: 640px) {
+  .masonry {
+    columns: 3;
+  }
+}
+@media (min-width: 1024px) {
+  .masonry {
+    columns: 4;
+  }
+}
+.masonry > * {
+  break-inside: avoid;
+  margin-bottom: 1rem;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast-in {
+  animation: toast-in 0.18s ease-out;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+.skeleton {
+  background: rgba(255, 255, 255, 0.06);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+
+/* Honor users who prefer less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .card-lift,
+  .toast-in,
+  .skeleton {
+    transition: none;
+    animation: none;
+  }
+}

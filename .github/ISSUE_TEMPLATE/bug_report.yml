@@ -1,0 +1,59 @@
+name: Bug report
+description: Something does not work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! **Security issues** must not be reported here — see [SECURITY.md](https://github.com/ariazonaa/uploader/security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Upload a file via …
+        2. Open …
+        3. See error
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag or commit SHA (`docker compose images`, or `uploader version`).
+      placeholder: ghcr.io/ariazonaa/uploader:1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose (this repository's docker-compose.yml)
+        - Docker (other setup)
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: proxy
+    attributes:
+      label: Reverse proxy
+      placeholder: nginx, Caddy, Traefik, Cloudflare, none …
+  - type: input
+    id: client
+    attributes:
+      label: Browser / client
+      placeholder: Firefox 140, ShareX 17, curl …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Output of `docker compose logs app` around the error, and the browser console if it is a UI problem. Remove anything private.
+      render: shell

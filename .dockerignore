@@ -1,0 +1,37 @@
+# Build context for the Dockerfile. It only COPYs frontend/ and backend/; the
+# rest is excluded so local state never leaks into (or busts the cache of) an
+# image layer. Each stage regenerates what is excluded here:
+#   node_modules          -> `npm ci` from the lockfile
+#   frontend/dist         -> `npm run build`
+#   frontend/public/vendor -> the prebuild script (vendor-swagger.mjs)
+#   backend web dist      -> replaced by the frontend stage's output
+
+# VCS and tooling state
+.git
+.gitea
+.github
+.claude
+.playwright-mcp
+.idea
+.vscode
+**/.DS_Store
+
+# Secrets and local data -- never part of an image
+.env
+.env.*
+!.env.example
+data/
+*.db
+
+# Dependencies and build output
+**/node_modules
+frontend/dist
+frontend/public/vendor
+backend/internal/web/dist/assets
+backend/uploader
+backend/uploader.exe
+**/*.test
+
+# Logs and scratch
+*.log
+**/*.log

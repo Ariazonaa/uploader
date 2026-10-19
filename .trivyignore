@@ -1,0 +1,27 @@
+# Trivy findings that are accepted rather than fixed.
+#
+# The pipeline validates this file before it will even start a scan: every entry
+# needs, in the contiguous comment block directly above it, a line matching
+#   expires YYYY-MM-DD
+# An expired entry fails the build, which is the point -- an exception here is a
+# dated decision, not a way to quiet a scan.
+
+# DS-0002 | Dockerfile | akzeptiert 2026-09-09 | expires 2027-03-01
+#
+# "Specify at least 1 USER command in Dockerfile with non-root user as argument."
+#
+# Accepted, because it does not describe this image. The container starts as
+# root ON PURPOSE and drops to uid 10001 inside the binary (dropPrivileges in
+# cmd/uploader/privdrop_linux.go, called first thing in runServe). It has to:
+# a bind-mounted ./data/files is created on the host as root, so the runtime
+# user cannot create the shard directories it writes blobs into and every
+# upload would fail with a 500. Doing the drop in the binary is also what lets
+# the runtime image ship without su-exec, and therefore without apk packages.
+#
+# A `USER uploader` line would turn this rule green and break the ownership
+# fixup -- a measurably worse image for a passing check. The process that
+# actually serves traffic is unprivileged either way, which is what the rule is
+# trying to ensure.
+#
+# Re-evaluate by the expiry date, or sooner if storage stops needing the chown.
+DS-0002

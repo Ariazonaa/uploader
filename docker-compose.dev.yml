@@ -1,0 +1,27 @@
+# Overlay for local development and quick tests. It publishes Postgres and the
+# app on localhost, which the production file deliberately does not.
+#
+# Database only (run the backend with `go run` and the frontend with Vite):
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
+#   # UPLOADER_DATABASE_URL=postgres://uploader:<POSTGRES_PASSWORD>@localhost:5432/uploader?sslmode=disable
+#
+# Whole stack on http://localhost:8080 without a reverse proxy:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Both bind to 127.0.0.1 only. Never use this overlay on a public server.
+
+services:
+  app:
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Plain HTTP on localhost: a Secure cookie would never be sent back.
+      - UPLOADER_SECURE_COOKIES=false
+      # No proxy in front, so forwarding headers must not be trusted.
+      - UPLOADER_TRUST_PROXY=false
+
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"

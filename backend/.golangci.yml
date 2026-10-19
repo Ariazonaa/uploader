@@ -1,0 +1,64 @@
+# golangci-lint configuration (v2 schema). Conservative, high-signal linters only.
+#
+# v2 rather than the v1 line this used to pin: v1.64.8 is from the Go 1.24 era
+# and had to be compiled from source here, because its released binaries refuse
+# to lint a go 1.26 module. Building it with a 1.26 toolchain is not reliable --
+# CI run 421 died in an internal compiler error inside one of its dependencies
+# (quasilyte/gogrep), having passed in run 413 with no Go changes in between.
+version: "2"
+
+linters:
+  # "standard" already enables errcheck, govet, ineffassign, staticcheck and
+  # unused; these are the additions.
+  enable:
+    - bodyclose
+    - misspell
+    # Security-focused static analysis: hardcoded credentials, weak crypto,
+    # unhandled subprocess/file-permission risks, integer conversions. Worth the
+    # noise for a service that ingests untrusted files from the internet.
+    - gosec
+
+  settings:
+    staticcheck:
+      # golangci-lint's documented default set, minus QF1001. The QF ("quickfix")
+      # checks are refactoring opinions rather than correctness: QF1001 wants
+      # De Morgan applied to the character-range guards in slug.go and totp.go,
+      # where `!(r >= 'a' && r <= 'z')` reads considerably better than the
+      # inverted form it suggests.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF1001
+    gosec:
+      excludes:
+        # G104 duplicates errcheck, which is part of the standard set.
+        - G104
+        # G304 (file path from a variable) fires on every storage read; the
+        # storage layer resolves keys through FileStorage.pathFor, which rejects
+        # traversal.
+        - G304
+
+  exclusions:
+    generated: lax
+    # The exclusion presets v1 applied by default. Listed explicitly so dropping
+    # them is a decision rather than an upgrade side effect.
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Test files may ignore errors, and hardcode throwaway keys, more liberally.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt

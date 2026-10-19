@@ -1,0 +1,85 @@
+# Project CI for GitHub Actions.
+#
+# Twin of .gitea/workflows/ci.yml — Gitea ignores .github/ entirely once
+# .gitea/workflows exists, so both files have to be maintained together. Keep
+# the job definitions identical; only this header differs.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A new push supersedes an in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: backend/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: golangci-lint
+        # v2, installed with the job's own toolchain. The v1 line this used to
+        # pin could not be used as a released binary (v1 refuses to lint a go
+        # 1.26 module) and could not reliably be built from source either: run
+        # 421 died in an internal compiler error inside one of its dependencies
+        # having passed in run 413, with no Go changes in between. v2 is current,
+        # builds cleanly, and .golangci.yml is on the v2 schema to match.
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout 5m
+      - name: govulncheck
+        # Also covered by the shared security pipeline, but not dependably: on
+        # main (run 369) its dependency scan reported success while this module
+        # had 24 reachable vulnerabilities, and its separate govulncheck job ran
+        # with every step skipped. Running it here makes the check explicit and
+        # unconditional instead of contingent on that pipeline's detection.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: build
+        run: go build ./...
+      - name: cross-build (container target)
+        # The privilege-drop code is split by build tag, so a native build alone
+        # does not prove the linux/amd64 image will compile.
+        run: GOOS=linux GOARCH=amd64 go build ./...
+      - name: test
+        run: go test ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci || npm install
+      - name: prettier check
+        run: npx prettier --check "src/**/*.{ts,tsx,css}"
+      - name: build
+        run: npm run build

@@ -1,0 +1,19 @@
+# Overlay to build the image locally instead of pulling it. The production
+# compose file deliberately has no `build:`, so a `docker compose up -d` on a
+# server never builds by accident and always runs the published image.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# It also overrides the image tag, so the local build is never mistaken for a
+# pulled :latest.
+
+services:
+  app:
+    build: .
+    image: uploader-local:dev
+    # While developing, the read-only root filesystem mostly gets in the way
+    # (debugging inside the running container). The capability list stays as in
+    # the base file: it is enough to run, and whether compose replaces or
+    # appends lists when merging is nothing to rely on here -- a `cap_drop: []`
+    # might simply have no effect.
+    read_only: false

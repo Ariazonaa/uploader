@@ -1,0 +1,1920 @@
+openapi: 3.0.3
+info:
+  title: Uploader API
+  version: "1.0.0"
+  description: |
+    JSON API for the self-hosted image/file uploader (Go backend + embedded React SPA).
+
+    ## Authentication
+    Most endpoints require authentication. Any one of three schemes is accepted:
+    - **cookieAuth** — the `uploader_session` cookie set by `POST /auth/login`
+      (browser/session flow).
+    - **bearerAuth** — an API token in the `Authorization: Bearer upl_...` header.
+    - **tokenHeader** — the same API token in an `X-Uploader-Token: upl_...` header.
+
+    Endpoints tagged as public override this with no security. Admin endpoints
+    additionally require the authenticated user to have `is_admin: true` (otherwise
+    they return `403`).
+
+    Token management and account security accept **only cookieAuth**: creating
+    and revoking tokens, password change, 2FA setup/enable/disable, session
+    listing and revocation, account deletion and data export. An API token gets
+    `403` there, so a leaked token cannot mint more tokens or take over the
+    account. Listing tokens and the admin endpoints keep accepting API tokens.
+
+    ## Errors
+    All JSON error responses share one shape: `{"error": "human readable message"}`.
+    `401` always means the credential is missing or invalid; when it cannot be
+    checked (database unreachable), authenticated endpoints answer `503` instead.
+    A state-changing request (anything but GET/HEAD/OPTIONS) that a browser
+    sends from another origin (`Sec-Fetch-Site`, or `Origin` not matching the
+    host) is refused with `403` before authentication. Clients that send
+    neither header, such as ShareX or curl, are not affected.
+
+    ## Non-JSON browser routes (NOT part of this JSON API)
+    The server also serves several public, server-rendered (HTML/binary) browser
+    routes that live outside `/api/v1` and are therefore not described here:
+    `/raw/{slug}.{ext}` (raw blob, chat-client auto-embed), `/thumb/{slug}`
+    (thumbnail), `/s/{slug}` (OpenGraph share page), `/p/{slug}` (minimal frameable
+    player), `/d/{key}` (public ShareX delete confirmation + POST delete),
+    `/oembed` (oEmbed document) and `/hls/{slug}/{file}` (HLS segments/playlist).
+
+servers:
+  - url: /api/v1
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+  - tokenHeader: []
+
+tags:
+  - name: Health
+    description: Liveness / readiness probes (public).
+  - name: Public
+    description: Endpoints reachable before login.
+  - name: Auth
+    description: Login, session and account management.
+  - name: 2FA
+    description: TOTP two-factor enrollment and management.
+  - name: Tokens
+    description: Personal API tokens.
+  - name: Upload
+    description: Direct multipart upload.
+  - name: tus
+    description: Resumable uploads (tus 1.0, core + creation + termination).
+  - name: Files
+    description: File listing, trash and lifecycle.
+  - name: Stats
+    description: Usage statistics and exports.
+  - name: Push
+    description: Web Push subscriptions.
+  - name: Settings
+    description: Runtime-editable configuration.
+  - name: Invites
+    description: Single-use registration invites (admin).
+  - name: Audit
+    description: Security audit log (admin).
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe (DB + storage)
+      description: Verifies the database connection and that storage is writable.
+      security: []
+      responses:
+        "200":
+          description: All dependencies healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "503":
+          description: One or more dependencies are unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+
+  /public/settings:
+    get:
+      tags: [Public]
+      summary: Public (pre-login) settings
+      description: Non-sensitive settings the SPA needs before login, including the first-run `needs_setup` flag.
+      security: []
+      responses:
+        "200":
+          description: Public settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicSettings"
+
+  /public/files/{slug}:
+    get:
+      tags: [Public]
+      summary: Public file metadata
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Slug"
+      responses:
+        "200":
+          description: File metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileView"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/setup:
+    post:
+      tags: [Auth]
+      summary: First-run bootstrap admin
+      description: Creates the bootstrap admin when no account exists yet, then logs them in. A no-op (409) once any user exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8, maxLength: 72, description: "8 to 72 bytes in UTF-8 (72 is bcrypt's limit)." }
+      responses:
+        "201":
+          description: Admin created and logged in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Setup already completed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: On success sets the `uploader_session` cookie. When the account has 2FA enabled, no session is created; a short-lived pending token is returned instead (exchange at `/auth/login/totp`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Logged in, or a 2FA challenge.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: The account could not be looked up (database unavailable); not counted as a failed attempt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login/totp:
+    post:
+      tags: [Auth]
+      summary: Complete a 2FA login
+      description: Exchanges the pending token plus a TOTP or one-time recovery code for a real session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pending, code]
+              properties:
+                pending: { type: string, description: Pending token from /auth/login. }
+                code: { type: string, description: 6-digit TOTP or a recovery code. }
+      responses:
+        "200":
+          description: Logged in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: The account could not be looked up (database unavailable); not counted as a failed attempt.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register with an invite code
+      description: Creates a non-admin account from a single-use invite code. Only active when `UPLOADER_REGISTRATION=invite`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password, invite_code]
+              properties:
+                username: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8, maxLength: 72, description: "8 to 72 bytes in UTF-8 (72 is bcrypt's limit)." }
+                invite_code: { type: string }
+      responses:
+        "201":
+          description: Account registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          description: Invalid or already-used invite code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Registration is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Username or email already in use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (destroys the current session)
+      responses:
+        "200":
+          description: Logged out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        "200":
+          description: The authenticated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/password:
+    post:
+      tags: [Auth]
+      summary: Change password
+      description: >-
+        Verifies the current password, then revokes every OTHER session (the
+        caller stays signed in) and reports how many were dropped. API tokens
+        are NOT revoked: they are separate credentials the user manages
+        explicitly, and invalidating them would break ShareX and similar
+        integrations. If revoking fails after the password was changed, the
+        change still succeeds and `sessions_revoked` is 0. Session only.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 8, maxLength: 72, description: "8 to 72 bytes in UTF-8 (72 is bcrypt's limit)." }
+      responses:
+        "200":
+          description: Password changed and other sessions revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  sessions_revoked:
+                    type: integer
+                    format: int64
+                    description: Number of other sessions that were signed out.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List active sessions
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: The user's sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+
+  /auth/sessions/{id}:
+    delete:
+      tags: [Auth]
+      summary: Revoke a session
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Hex-encoded session id.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Session revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/sessions/revoke-others:
+    post:
+      tags: [Auth]
+      summary: Revoke all other sessions
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Number of sessions revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: integer, format: int64 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+
+  /auth/account:
+    delete:
+      tags: [Auth]
+      summary: Delete account (GDPR erasure)
+      description: >-
+        Removes the account and all of its data. Requires the current password.
+        Refused with 409 when this is the last admin account, which would leave
+        the instance with nobody able to reach settings or invites.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Account deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "409":
+          description: This is the only admin account; promote another admin first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/export:
+    get:
+      tags: [Auth]
+      summary: Export account data (GDPR portability)
+      description: >-
+        Streams a ZIP archive with all of the user's files (including the trash) plus a JSON manifest
+        and a data-subject notice. Each instance streams at most two exports at a time; further
+        requests get 429 with Retry-After.
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: ZIP archive.
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/totp/setup:
+    post:
+      tags: [2FA]
+      summary: Begin 2FA enrollment
+      description: >-
+        Generates a secret (stored encrypted, not yet enabled) and returns the
+        otpauth URL + secret to display once. Requires a browser session and
+        the account password, so neither a leaked API token nor an unattended
+        session can bind 2FA to someone else's authenticator. Wrong passwords
+        count against the same per-account limit as failed logins.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Pending TOTP secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  otpauth_url: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "409":
+          description: 2FA is already enabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/totp/enable:
+    post:
+      tags: [2FA]
+      summary: Enable 2FA
+      description: >-
+        Verifies the account password and the first code against the pending
+        secret and, on success, enables 2FA and returns one-time recovery codes
+        (shown once).
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, password]
+              properties:
+                code: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: 2FA enabled.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: enabled }
+                  recovery_codes:
+                    type: array
+                    items: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "409":
+          description: 2FA is already enabled, or setup was started again in the meantime (the code was checked against a secret that is no longer pending).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/totp/disable:
+    post:
+      tags: [2FA]
+      summary: Disable 2FA
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: 2FA disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tokens:
+    get:
+      tags: [Tokens]
+      summary: List API tokens
+      responses:
+        "200":
+          description: The user's tokens (never the plaintext value).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TokenView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Tokens]
+      summary: Create an API token
+      description: >-
+        The plaintext token is returned exactly once and never again. An
+        account can hold at most 50 tokens; creation is rate-limited per
+        account.
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, default: token }
+      responses:
+        "201":
+          description: Token created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  token:
+                    type: string
+                    description: Plaintext token (e.g. `upl_...`). Shown only once.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "409":
+          description: The account already holds the maximum number of tokens.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /tokens/{id}:
+    delete:
+      tags: [Tokens]
+      summary: Revoke an API token
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      responses:
+        "200":
+          description: Token revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/SessionRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /upload:
+    post:
+      tags: [Upload]
+      summary: Upload a file (multipart)
+      description: |
+        Uploads one file via `multipart/form-data`. The MIME type is sniffed from
+        the bytes (the client Content-Type is not trusted). ShareX-compatible.
+      parameters:
+        - name: slug
+          in: query
+          required: false
+          description: Optional custom slug (3–64 chars of letters, digits, `-` or `_`). Collides (ignoring case) → 409.
+          schema: { type: string }
+        - name: strip_exif
+          in: query
+          required: false
+          description: Set `false`/`0` to keep image metadata (defaults to the server `strip_exif` setting).
+          schema: { type: string, enum: ["false", "0"] }
+        - name: encrypt
+          in: query
+          required: false
+          description: Force at-rest encryption on/off (defaults to the server `encrypt_default` setting).
+          schema: { type: string, enum: ["true", "1", "false", "0"] }
+        - name: slug_strategy
+          in: query
+          required: false
+          description: Auto-slug naming (defaults to the server `slug_strategy` setting).
+          schema: { type: string, enum: [random, gfycat, date] }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: File stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: The requested custom slug is already taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          description: File exceeds the configured upload limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: This file type is blocked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          description: Encryption requested but not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /upload/defaults:
+    get:
+      tags: [Upload]
+      summary: Per-upload defaults
+      description: |
+        The defaults the server applies to an upload that sends no override, so a
+        client can pre-set its toggles (the full settings are admin-only).
+      responses:
+        "200":
+          description: Upload defaults.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  encrypt_default:
+                    type: boolean
+                    description: Server `encrypt_default` setting (applies when `encrypt` is omitted).
+                  encryption_available:
+                    type: boolean
+                    description: Whether an encryption key is configured; encrypted uploads fail with 503 otherwise.
+                  strip_exif_default:
+                    type: boolean
+                  max_upload_bytes:
+                    type: integer
+                    format: int64
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /tus:
+    options:
+      tags: [tus]
+      summary: tus capabilities
+      description: Advertises tus support via response headers (`Tus-Resumable`, `Tus-Version`, `Tus-Extension`, `Tus-Max-Size`).
+      responses:
+        "204":
+          description: Capability headers.
+          headers:
+            Tus-Resumable:
+              schema: { type: string, example: 1.0.0 }
+            Tus-Version:
+              schema: { type: string, example: 1.0.0 }
+            Tus-Extension:
+              schema: { type: string, example: "creation,termination" }
+            Tus-Max-Size:
+              schema: { type: integer, format: int64 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [tus]
+      summary: Create a resumable upload
+      description: |
+        Creates a new upload (tus creation extension). The declared size is sent in
+        the `Upload-Length` header; the filename is base64-encoded inside
+        `Upload-Metadata` (`filename <b64>`). The upload URL is returned in the
+        `Location` response header.
+
+        Rate-limited like a direct upload (per IP and per account), and capped at
+        10 unfinished uploads per account — each one holds scratch space until it
+        completes, is terminated (`DELETE`), or is swept after 24h. When the cap
+        is reached, the account's oldest upload that has been idle for over an
+        hour is evicted to make room; only if none is that stale does creation
+        fail with 429.
+
+        An empty upload (`Upload-Length: 0`) is complete on creation and is
+        stored right away: the 201 then carries `X-Uploader-Url` and
+        `X-Uploader-Slug`, and a failure is answered with the final step's status
+        (e.g. 415) instead of 201.
+      parameters:
+        - name: Upload-Length
+          in: header
+          required: true
+          description: Total size in bytes of the upload to be created.
+          schema: { type: integer, format: int64 }
+        - name: Upload-Metadata
+          in: header
+          required: false
+          description: 'Comma-separated `key b64value` pairs, e.g. `filename c2hvdC5wbmc=`.'
+          schema: { type: string }
+        - name: encrypt
+          in: query
+          required: false
+          description: Force at-rest encryption on/off (defaults to the server `encrypt_default` setting).
+          schema: { type: string, enum: ["true", "1", "false", "0"] }
+        - name: slug
+          in: query
+          required: false
+          description: >-
+            Optional custom slug, as for `POST /upload`. Validated here (400); a
+            collision is only known when the upload completes (409 on the final
+            PATCH, upload discarded).
+          schema: { type: string }
+        - name: strip_exif
+          in: query
+          required: false
+          description: Set `false`/`0` to keep image metadata (defaults to the server `strip_exif` setting).
+          schema: { type: string, enum: ["false", "0"] }
+        - name: slug_strategy
+          in: query
+          required: false
+          description: Auto-slug naming (defaults to the server `slug_strategy` setting).
+          schema: { type: string, enum: [random, gfycat, date] }
+      responses:
+        "201":
+          description: Upload created.
+          headers:
+            Location:
+              description: URL of the created upload (`/api/v1/tus/{id}`).
+              schema: { type: string }
+            Upload-Offset:
+              schema: { type: integer, format: int64, example: 0 }
+            X-Uploader-Url:
+              description: Present only for an empty upload, which is stored on creation.
+              schema: { type: string }
+            X-Uploader-Slug:
+              description: Present only for an empty upload, which is stored on creation.
+              schema: { type: string }
+            Tus-Resumable:
+              schema: { type: string, example: 1.0.0 }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: Declared length exceeds the upload limit.
+        "429":
+          description: >-
+            Rate limit exceeded, or too many unfinished uploads are already open
+            for this account. For the latter, `Retry-After` gives the seconds
+            until the oldest one becomes evictable.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Encryption requested but not configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /tus/{id}:
+    head:
+      tags: [tus]
+      summary: Get the current upload offset
+      description: |
+        For an upload that has already completed, reports `Upload-Offset` equal to
+        `Upload-Length` together with `X-Uploader-Url`/`X-Uploader-Slug`, so a
+        client that lost the final PATCH response still learns the result.
+
+        `Upload-Offset` equal to `Upload-Length` is never reported without a
+        result: if every byte has arrived but the final step failed, HEAD runs it
+        again and answers either the result or that step's error status (5xx:
+        the upload is kept for another retry; 409/415/503: it is discarded).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Current offset.
+          headers:
+            Upload-Offset:
+              schema: { type: integer, format: int64 }
+            Upload-Length:
+              schema: { type: integer, format: int64 }
+            X-Uploader-Url:
+              description: Present only once the upload has completed.
+              schema: { type: string }
+            X-Uploader-Slug:
+              description: Present only once the upload has completed.
+              schema: { type: string }
+            Tus-Resumable:
+              schema: { type: string, example: 1.0.0 }
+        "404":
+          description: Unknown upload (or not owned by the caller).
+        "409":
+          description: The final step found the custom slug taken (upload discarded).
+        "415":
+          description: The final step found the file type blocked (upload discarded).
+        "423":
+          description: Another request on this upload is still running; retry.
+        "500":
+          description: The final step failed transiently; the upload is kept, retry.
+        "503":
+          description: The final step needs encryption, which is not configured (upload discarded).
+    patch:
+      tags: [tus]
+      summary: Append a chunk
+      description: |
+        Appends bytes at the given `Upload-Offset`. The body Content-Type must be
+        `application/offset+octet-stream`. When the upload completes, the assembled
+        file runs through the normal upload pipeline and the resulting share URL is
+        returned in the `X-Uploader-Url` response header (and slug in `X-Uploader-Slug`).
+
+        If that final step fails transiently (5xx), the received bytes are kept:
+        retry it with an empty-bodied PATCH at `Upload-Offset` = length. Repeating
+        the final PATCH after a success returns the same result without storing
+        the file again. Permanent failures (blocked type, encryption unavailable,
+        custom slug taken) discard the upload. The per-upload options are the
+        ones given at creation.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Upload-Offset
+          in: header
+          required: true
+          description: Byte offset at which this chunk starts (must equal the server's current offset).
+          schema: { type: integer, format: int64 }
+        - name: Content-Type
+          in: header
+          required: true
+          schema: { type: string, enum: [application/offset+octet-stream] }
+      requestBody:
+        required: true
+        content:
+          application/offset+octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: Chunk stored (upload complete if `X-Uploader-Url` is present).
+          headers:
+            Upload-Offset:
+              schema: { type: integer, format: int64 }
+            X-Uploader-Url:
+              description: Present only on completion.
+              schema: { type: string }
+            X-Uploader-Slug:
+              description: Present only on completion.
+              schema: { type: string }
+            Tus-Resumable:
+              schema: { type: string, example: 1.0.0 }
+        "404":
+          description: Unknown upload (or not owned by the caller).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: >-
+            Offset mismatch; or, on the final chunk, the custom slug requested at
+            creation is taken (JSON error body, upload discarded).
+        "413":
+          description: Chunk exceeds the declared remaining length.
+        "423":
+          description: >-
+            Another request on this upload (a chunk, or the final step) is still
+            running after ~10 s; retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "415":
+          description: Wrong Content-Type, or the finished file's type is blocked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: Storing the finished file failed transiently; the upload is kept for a retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Encryption requested but not configured (upload discarded).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [tus]
+      summary: Terminate an upload
+      description: |
+        tus termination extension: abandons an unfinished upload (or the result
+        record of a finished one) and frees its scratch space and its slot under
+        the per-account cap immediately. Owner only. Does not delete a file that
+        was already stored — use `DELETE /files/{id}` for that.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Upload terminated.
+          headers:
+            Tus-Resumable:
+              schema: { type: string, example: 1.0.0 }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Unknown upload (or not owned by the caller).
+        "423":
+          description: Another request on this upload is still running; retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /files:
+    get:
+      tags: [Files]
+      summary: List files
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 60, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+        - name: order
+          in: query
+          description: Sort direction (`asc` or descending otherwise).
+          schema: { type: string, enum: [asc, desc], default: desc }
+        - name: q
+          in: query
+          description: Free-text search over file name. Only the first 200 characters are used.
+          schema: { type: string }
+        - name: type
+          in: query
+          description: Filter by MIME prefix (e.g. `image/`, `video/`).
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: Sort field (e.g. `created_at`, `size_bytes`, `views`).
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching files.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /files/trash:
+    get:
+      tags: [Files]
+      summary: List trashed files
+      description: A page of soft-deleted files, most recently trashed first.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 60, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        "200":
+          description: Soft-deleted files.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /files/trash/empty:
+    post:
+      tags: [Files]
+      summary: Empty the trash
+      description: Permanently deletes all trashed files (and their blobs).
+      responses:
+        "200":
+          description: Count purged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedCount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /files/{id}:
+    patch:
+      tags: [Files]
+      summary: Rename a file
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 255 }
+      responses:
+        "200":
+          description: Renamed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: renamed }
+                  name: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Files]
+      summary: Move a file to the trash (soft delete)
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      responses:
+        "200":
+          description: Trashed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: trashed }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /files/{id}/restore:
+    post:
+      tags: [Files]
+      summary: Restore a file from the trash
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      responses:
+        "200":
+          description: Restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: restored }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /files/{id}/purge:
+    delete:
+      tags: [Files]
+      summary: Permanently delete a trashed file
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: deleted }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /files/bulk-delete:
+    post:
+      tags: [Files]
+      summary: Soft-delete many files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Count deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeletedCount"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /stats:
+    get:
+      tags: [Stats]
+      summary: Aggregate usage for the current user
+      responses:
+        "200":
+          description: Usage totals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Stats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /stats/activity:
+    get:
+      tags: [Stats]
+      summary: Per-day upload counts
+      parameters:
+        - name: days
+          in: query
+          description: Look-back window in days.
+          schema: { type: integer, default: 365, minimum: 1, maximum: 372 }
+        - name: tz
+          in: query
+          description: >-
+            IANA time zone used to bucket uploads into days (e.g. Europe/Berlin).
+            Defaults to UTC; a well-formed zone the server does not know also
+            falls back to UTC. A malformed value is a `400`.
+          schema: { type: string, example: Europe/Berlin }
+      responses:
+        "200":
+          description: Daily activity.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    day: { type: string, format: date }
+                    count: { type: integer }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /stats/export:
+    get:
+      tags: [Stats]
+      summary: Export file statistics (CSV or JSON)
+      parameters:
+        - name: format
+          in: query
+          description: Output format; `json` returns JSON, anything else returns CSV.
+          schema: { type: string, enum: [csv, json], default: csv }
+      responses:
+        "200":
+          description: Statistics export (attachment).
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FileView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /stats/views:
+    get:
+      tags: [Stats]
+      summary: Aggregated traffic stats (admin)
+      description: Privacy-first top referrer hosts and view counts by user-agent category.
+      responses:
+        "200":
+          description: Traffic breakdown.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  referrers:
+                    type: array
+                    items: { $ref: "#/components/schemas/NameCount" }
+                  agents:
+                    type: array
+                    items: { $ref: "#/components/schemas/NameCount" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /push/subscribe:
+    post:
+      tags: [Push]
+      summary: Save a Web Push subscription
+      description: >-
+        An account can register at most 20 subscriptions; refreshing one it
+        already has always works. Rate-limited per account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushSubscription"
+      responses:
+        "201":
+          description: Subscribed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: Push is not enabled on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            The endpoint is registered to another account, or this account has
+            reached the subscription limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /push/unsubscribe:
+    post:
+      tags: [Push]
+      summary: Remove a Web Push subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string, format: uri }
+      responses:
+        "200":
+          description: Unsubscribed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /push/test:
+    post:
+      tags: [Push]
+      summary: Send a test push notification
+      responses:
+        "200":
+          description: Sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "404":
+          description: Push is not enabled on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /settings:
+    get:
+      tags: [Settings]
+      summary: Get runtime settings (admin)
+      description: >-
+        The full operator configuration (blocked MIME types, retention windows,
+        public URL, embed templates). Admin-only: non-admins get 403. The
+        pre-login subset lives at `/public/settings`.
+      responses:
+        "200":
+          description: Full editable settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    patch:
+      tags: [Settings]
+      summary: Update runtime settings (admin)
+      description: >-
+        Partial update. Only known keys are accepted; unknown keys are ignored.
+        All values are strings. URL settings must be empty or an absolute
+        http(s) URL (`app_logo_url`/`login_bg_url` may also be a path starting
+        with `/`); an invalid value rejects the whole update with 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Settings"
+      responses:
+        "200":
+          description: Updated settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /invites:
+    get:
+      tags: [Invites]
+      summary: List invites (admin)
+      responses:
+        "200":
+          description: Invites.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InviteView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Invites]
+      summary: Create an invite (admin)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_in_days: { type: integer, minimum: 0, maximum: 3650, description: Optional expiry in whole days; 0/omitted = never expires. }
+      responses:
+        "201":
+          description: Invite created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /invites/{code}:
+    delete:
+      tags: [Invites]
+      summary: Revoke an unused invite (admin)
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /audit:
+    get:
+      tags: [Audit]
+      summary: List audit-log events (admin)
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+        - name: event
+          in: query
+          description: Filter by event name (unknown values are ignored).
+          schema: { type: string }
+        - name: user
+          in: query
+          description: Filter by user id.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Paged audit events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEvent"
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /openapi.yaml:
+    get:
+      tags: [Public]
+      summary: This OpenAPI document
+      description: Returns this specification as YAML. Readable by any authenticated user (401 when logged out).
+      responses:
+        "200":
+          description: The OpenAPI 3 document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: uploader_session
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An API token, e.g. `upl_...`.
+    tokenHeader:
+      type: apiKey
+      in: header
+      name: X-Uploader-Token
+
+  parameters:
+    Slug:
+      name: slug
+      in: path
+      required: true
+      schema: { type: string }
+    UUIDPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid authentication.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated but not an admin.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    SessionRequired:
+      description: Authenticated with an API token; this endpoint requires a browser session (cookieAuth).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Rate limit exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: invalid request body
+
+    Status:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+
+    DeletedCount:
+      type: object
+      properties:
+        deleted:
+          type: integer
+
+    NameCount:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer, format: int64 }
+
+    Readiness:
+      type: object
+      properties:
+        db: { type: string, example: ok }
+        storage: { type: string, example: ok }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        email: { type: string, format: email }
+        is_admin: { type: boolean }
+        totp_enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    LoginResult:
+      description: Either the logged-in user, or a 2FA challenge when the account has TOTP enabled.
+      oneOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          properties:
+            totp_required: { type: boolean, example: true }
+            pending:
+              type: string
+              description: Short-lived pending token to exchange at /auth/login/totp.
+
+    FileView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        mime_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        duration_ms: { type: integer, format: int64, nullable: true }
+        views: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        deleted_at: { type: string, format: date-time, nullable: true }
+        url:
+          type: string
+          description: Public share-page URL (/s/{slug}).
+        raw:
+          type: string
+          description: Raw blob URL ending in the real extension (/raw/{slug}.{ext}).
+        thumb:
+          type: string
+          description: Thumbnail URL, present only when a thumbnail exists.
+        encrypted:
+          type: boolean
+          description: Whether the blob is stored AES-256-GCM encrypted at rest.
+
+    UploadResult:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        url: { type: string, description: Share-page URL. }
+        raw: { type: string, description: Raw blob URL (with real extension). }
+        name: { type: string }
+        size: { type: integer, format: int64 }
+        encrypted: { type: boolean }
+        thumb:
+          type: string
+          description: Thumbnail URL (only when a thumbnail was generated).
+        delete:
+          type: string
+          description: ShareX-style public deletion URL (/d/{key}), when a delete key exists.
+
+    TokenView:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        prefix:
+          type: string
+          description: Non-secret token prefix used for lookup.
+        last_used_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    SessionView:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Hex-encoded session id.
+        ip: { type: string }
+        user_agent: { type: string }
+        current:
+          type: boolean
+          description: Whether this is the session making the request.
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
+    InviteView:
+      type: object
+      properties:
+        code: { type: string }
+        used: { type: boolean }
+        expires_at: { type: string, format: date-time, nullable: true }
+        used_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    AuditEvent:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        user_id: { type: string, format: uuid, nullable: true }
+        actor_label: { type: string }
+        event: { type: string }
+        target: { type: string }
+        ip: { type: string }
+        user_agent: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form event metadata (never contains secrets).
+
+    PushSubscription:
+      type: object
+      required: [endpoint, keys]
+      properties:
+        endpoint: { type: string, format: uri }
+        keys:
+          type: object
+          required: [p256dh, auth]
+          properties:
+            p256dh: { type: string }
+            auth: { type: string }
+
+    Stats:
+      type: object
+      properties:
+        file_count: { type: integer, format: int64 }
+        total_bytes: { type: integer, format: int64 }
+        total_views: { type: integer, format: int64 }
+
+    PublicSettings:
+      type: object
+      properties:
+        app_name: { type: string }
+        max_upload_bytes: { type: integer, format: int64 }
+        registration_enabled: { type: boolean }
+        needs_setup:
+          type: boolean
+          description: True only while no account exists (drives the first-run wizard).
+        app_logo_url: { type: string }
+        login_heading: { type: string }
+        login_subtext: { type: string }
+        login_bg_url: { type: string }
+        legal_notice: { type: string }
+        push_enabled: { type: boolean }
+        vapid_public_key: { type: string }
+
+    Settings:
+      description: >-
+        Runtime-editable settings. Every value is a string (booleans as
+        "true"/"false", numbers as decimal strings). On PATCH, send only the keys
+        you want to change.
+      type: object
+      properties:
+        app_name: { type: string }
+        public_url: { type: string }
+        embed_site_name: { type: string }
+        embed_description: { type: string }
+        embed_color: { type: string }
+        embed_title: { type: string }
+        embed_author_name: { type: string }
+        embed_author_url: { type: string }
+        app_logo_url: { type: string }
+        login_heading: { type: string }
+        login_subtext: { type: string }
+        login_bg_url: { type: string }
+        hide_powered_by:
+          type: string
+          description: '"true"/"false": hide the "powered by" footer on share pages.'
+        legal_notice: { type: string }
+        blocked_mime:
+          type: string
+          description: >-
+            Newline/comma/space-separated list of blocked MIME types: exact, or a
+            prefix ending in "/" or "*". Matched against the type sniffed from the
+            content; executables (application/x-msdownload, application/x-executable,
+            application/x-mach-binary), "#!" scripts (text/x-shellscript) and SVG
+            (image/svg+xml) are recognized too.
+        retention_days:
+          type: string
+          description: Global file retention window in days ("0" = keep forever; values above 36500 are clamped to 36500).
+        max_upload_mib:
+          type: string
+          description: Per-file upload cap in MiB ("0" = fall back to the env/default; values above 1048576 are clamped to 1048576).
+        strip_exif:
+          type: string
+          description: '"true"/"false": strip image metadata by default on upload.'
+        encrypt_default:
+          type: string
+          description: '"true"/"false": encrypt uploads at rest by default.'
+        trash_retention_days:
+          type: string
+          description: Days a trashed file stays recoverable before auto-purge ("0" = forever; values above 36500 are clamped to 36500).
+        audit_retention_days:
+          type: string
+          description: Days audit-log entries are kept before the janitor deletes them ("0" = forever; values above 36500 are clamped to 36500).
