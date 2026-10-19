@@ -4,7 +4,7 @@
 # Both build stages run on the build machine's own platform and cross-compile
 # for the target (TARGETOS/TARGETARCH), so a multi-arch build does not run npm
 # and the Go compiler under emulation.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
+FROM --platform=$BUILDPLATFORM node:26-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 # Resilient install on flaky networks: more retries, longer timeouts, a single
