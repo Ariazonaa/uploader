@@ -201,10 +201,18 @@ func (s *Server) handleLoginTOTP(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, retry, "too many failed 2FA attempts, try again later")
 		return
 	}
+	// The long-term budget: refunded when the code was right, but never reset,
+	// so earlier failures keep counting across successful logins.
+	if ok, retry := lims.totpAccountSlow.take(totpKey); !ok {
+		lims.totpAccount.refund(totpKey)
+		writeRateLimited(w, retry, "too many failed 2FA attempts, try again later")
+		return
+	}
 	u, err := s.store.GetUserByID(r.Context(), pending.UserID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		lims.pendingToken.refund(tokenKey)
 		lims.totpAccount.refund(totpKey)
+		lims.totpAccountSlow.refund(totpKey)
 		log.Printf("auth: 2FA login lookup: %v", err)
 		writeErr(w, http.StatusServiceUnavailable, "login is temporarily unavailable, try again later")
 		return
@@ -265,6 +273,7 @@ func (s *Server) handleLoginTOTP(w http.ResponseWriter, r *http.Request) {
 	}
 	lims.pendingToken.exhaust(tokenKey)
 	lims.totpAccount.reset(totpKey)
+	lims.totpAccountSlow.refund(totpKey)
 
 	if err := s.sessions.Create(r.Context(), w, u.ID, s.clientIP(r), clientUA(r)); err != nil {
 		writeErr(w, http.StatusInternalServerError, "could not create session")

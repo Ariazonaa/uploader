@@ -58,7 +58,15 @@ FROM alpine:3.24
 # image scan in .gitea/workflows/security.yml blocks the push over exactly that.
 # Shipping a CVE that upstream has already fixed is the worse trade, and the
 # build reaches the network for npm, Go modules and the base images anyway.
-RUN apk --no-cache upgrade && adduser -D -u 10001 uploader && mkdir -p /data/files
+#
+# APK_REFRESH only exists to invalidate this layer. The instruction text never
+# changes, so a layer cache (type=gha in the Docker workflow) kept serving the
+# packages of the day it was first built until the base image digest moved:
+# the fixed package never arrived and the image scan failed every build. The
+# workflow passes a value that is new on every run; a plain `docker build`
+# leaves it empty and behaves as before.
+ARG APK_REFRESH=
+RUN : "apk refresh ${APK_REFRESH}" && apk --no-cache upgrade && adduser -D -u 10001 uploader && mkdir -p /data/files
 COPY --from=backend /uploader /usr/local/bin/uploader
 # Static ffmpeg/ffprobe from Docker Hub (no apk needed) — enables video
 # thumbnails and HLS transcoding. Remove these two lines to ship a smaller,

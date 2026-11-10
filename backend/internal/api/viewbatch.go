@@ -68,6 +68,21 @@ func (b *viewBatcher) add(slug, referrer, ua string, countView bool) {
 	b.pending[k] = c
 }
 
+// addView counts one view toward the file's public view counter without a
+// breakdown entry (a zero count is not written, see store.RecordViews).
+func (b *viewBatcher) addView(slug string) {
+	k := viewKey{slug: slug}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, ok := b.pending[k]
+	if !ok && len(b.pending) >= maxPendingViewKeys {
+		b.dropped++
+		return
+	}
+	c.views++
+	b.pending[k] = c
+}
+
 // flush writes everything pending. A failed chunk is logged and dropped, not
 // retried: putting it back could double-count a batch that did commit before
 // the error reached us.

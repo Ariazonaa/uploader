@@ -90,7 +90,7 @@ export const en = {
   "uploader.encrypt": "Encrypt",
   "uploader.copiedLink": "copied link",
   "uploader.secondsLeft": "{n}s left",
-  "uploader.slugIgnored": "Custom link only applies to a single file under 10 MiB — ignored",
+  "uploader.slugIgnored": "Custom link only applies to a single file — ignored",
   "uploader.invalidResponse": "invalid server response",
   "uploader.uploadFailed": "upload failed ({status})",
   "uploader.networkError": "network error",

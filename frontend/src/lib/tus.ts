@@ -19,6 +19,15 @@ const CHUNK = 5 * 1024 * 1024; // 5 MiB
 // Consecutive failed requests tolerated before an upload is given up.
 const MAX_FAILURES = 6;
 const TUS_HEADERS = { "Tus-Resumable": "1.0.0" };
+// How long an upload may stay "busy" (423) before that counts as failing. 423
+// means an earlier request of ours still holds the upload's lock. The server
+// stores a complete upload inside the request that sent the last byte; for a
+// file of several GiB on slow disks that outlasts a reverse proxy's read
+// timeout. The request then fails (504) while the server is still working, and
+// every retry is answered 423 until it is done. Giving up after MAX_FAILURES
+// of those reported a failure, and deleted the upload, moments before the
+// server finished storing it.
+const FINALIZE_WAIT_MS = 30 * 60 * 1000;
 
 export interface TusProgress {
   pct: number;
@@ -29,6 +38,8 @@ export interface TusProgress {
 export interface TusOptions {
   // Store the blob encrypted at rest; undefined leaves it to the server default.
   encrypt?: boolean;
+  // Custom slug for the share link; empty or undefined lets the server pick.
+  slug?: string;
   // Aborting cancels the upload and terminates it on the server.
   signal?: AbortSignal;
 }
@@ -70,8 +81,8 @@ function installUnloadHook() {
   });
 }
 
-function fingerprint(file: File, encrypt?: boolean): string {
-  return [file.name, file.size, file.lastModified, String(encrypt)].join("|");
+function fingerprint(file: File, opts: TusOptions): string {
+  return [file.name, file.size, file.lastModified, String(opts.encrypt), opts.slug ?? ""].join("|");
 }
 
 // relativePath keeps requests same-origin (so the session cookie is sent) even
@@ -87,6 +98,11 @@ function relativePath(location: string): string {
 // retryable reports whether a failed response is worth retrying unchanged.
 function retryable(status: number): boolean {
   return status === 429 || status === 423 || status >= 500;
+}
+
+// hasMessage reports whether a response carries the API's JSON error body.
+function hasMessage(res: Response): boolean {
+  return (res.headers.get("Content-Type") ?? "").includes("json");
 }
 
 async function errorFrom(res: Response): Promise<Error> {
@@ -138,7 +154,11 @@ async function terminate(url: string): Promise<boolean> {
 
 // create opens a new upload and returns its (same-origin) URL.
 async function create(file: File, opts: TusOptions): Promise<string> {
-  const qs = opts.encrypt === undefined ? "" : `?encrypt=${opts.encrypt}`;
+  // The options are recorded with the upload at creation.
+  const params = new URLSearchParams();
+  if (opts.encrypt !== undefined) params.set("encrypt", String(opts.encrypt));
+  if (opts.slug) params.set("slug", opts.slug);
+  const qs = params.size > 0 ? `?${params}` : "";
   for (let attempt = 0; ; attempt++) {
     let res: Response | null = null;
     try {
@@ -179,6 +199,8 @@ async function transfer(
   const start = Date.now();
   const startOffset = offset;
   let failures = 0;
+  // When the server first reported the upload as busy (423).
+  let busySince: number | null = null;
 
   for (;;) {
     if (signal?.aborted) throw abortError();
@@ -219,11 +241,20 @@ async function transfer(
         failures = 0;
         continue;
       }
-    } else if (res && res.status !== 409 && !retryable(res.status)) {
+    } else if (res && !retryable(res.status) && (res.status !== 409 || hasMessage(res))) {
+      // A bare 409 is a stale offset and is resynced below. One with a message
+      // is the final step refusing the upload: its custom slug has been taken.
       throw await errorFrom(res);
     }
 
-    failures++;
+    // The server is still working on an earlier request (see FINALIZE_WAIT_MS):
+    // wait for it instead of counting towards giving up.
+    let waiting = false;
+    if (res?.status === 423) {
+      busySince ??= Date.now();
+      waiting = Date.now() - busySince < FINALIZE_WAIT_MS;
+    }
+    if (!waiting) failures++;
     if (failures > MAX_FAILURES) {
       if (res?.ok) throw new Error(tGlobal("uploader.invalidResponse"));
       throw res ? await errorFrom(res) : new Error(tGlobal("uploader.networkError"));
@@ -231,7 +262,10 @@ async function transfer(
     // 409 means our offset is stale — resync at once; anything else backs off.
     if (res?.status !== 409) {
       await sleep(
-        backoffMs(failures - 1, res && !res.ok ? retryAfterMs(res.headers.get("Retry-After")) : null),
+        backoffMs(
+          Math.max(failures - 1, 0),
+          res && !res.ok ? retryAfterMs(res.headers.get("Retry-After")) : null,
+        ),
         signal,
       );
     }
@@ -259,7 +293,7 @@ export async function tusUpload(
   opts: TusOptions = {},
 ): Promise<{ url: string }> {
   installUnloadHook();
-  const key = fingerprint(file, opts.encrypt);
+  const key = fingerprint(file, opts);
   // Claim the entry, so a concurrent upload of the same file opens its own.
   let url = knownUploads.get(key) ?? null;
   knownUploads.delete(key);

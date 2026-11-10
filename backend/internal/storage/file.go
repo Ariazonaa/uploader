@@ -88,6 +88,36 @@ func (f *FileStorage) Put(ctx context.Context, key string, r io.Reader) (int64, 
 	return n, nil
 }
 
+// Import moves the file at srcPath to key instead of copying it. It only works
+// within one filesystem; the rename fails otherwise and srcPath is untouched.
+func (f *FileStorage) Import(ctx context.Context, key, srcPath string) error {
+	path, err := f.pathFor(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	// Flushed before the rename publishes it, like Put: whoever wrote the file
+	// did not necessarily sync it.
+	src, err := os.OpenFile(srcPath, os.O_RDWR, 0) // #nosec G304 -- a path of the caller's own scratch
+	if err != nil {
+		return err
+	}
+	err = src.Sync()
+	if closeErr := src.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(srcPath, path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
 // syncDir makes a rename in dir durable. Best-effort: Windows cannot sync a
 // directory handle, and a lost rename leaves the staging file behind, not a
 // corrupt blob.

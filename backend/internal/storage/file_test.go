@@ -142,3 +142,46 @@ func TestFileStorageRejectsTraversal(t *testing.T) {
 		}
 	}
 }
+
+// Import moves a file into place without leaving the source behind, and
+// refuses keys outside the root like Put does.
+func TestFileStorageImport(t *testing.T) {
+	root := t.TempDir()
+	st, err := NewFileStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	src := filepath.Join(root, ".tus", "upload.bin")
+	if err := os.MkdirAll(filepath.Dir(src), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("moved, not copied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Import(ctx, "../escape.txt", src); err == nil {
+		t.Fatal("Import accepted a key outside the root")
+	}
+	if err := st.Import(ctx, "ab/cd/abcd.txt", src); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if _, err := os.Stat(src); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the source is still there after Import (stat err %v)", err)
+	}
+	rc, err := st.Open(ctx, "ab/cd/abcd.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	got, err := io.ReadAll(rc)
+	if err != nil || string(got) != "moved, not copied" {
+		t.Fatalf("imported blob = %q (err %v)", got, err)
+	}
+	// A source that does not exist is an error, and nothing appears at the key.
+	if err := st.Import(ctx, "ab/cd/none.txt", src); err == nil {
+		t.Fatal("Import of a missing file succeeded")
+	}
+	if _, err := st.Stat(ctx, "ab/cd/none.txt"); err == nil {
+		t.Fatal("a failed Import left a blob behind")
+	}
+}

@@ -78,7 +78,10 @@ jobs:
           node-version: "26"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci || npm install
+      # Strictly `npm ci`, like the Dockerfile: an `|| npm install` fallback
+      # re-resolves the tree when the lockfile is out of sync, so CI would pass
+      # on dependencies the image build (and the lockfile) do not have.
+      - run: npm ci
       - name: prettier check
         run: npx prettier --check "src/**/*.{ts,tsx,css}"
       - name: build

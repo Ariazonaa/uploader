@@ -3,9 +3,18 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"uploader/internal/auth"
+	"uploader/internal/config"
 	"uploader/internal/db/store"
+	"uploader/internal/settings"
 )
 
 // Views are aggregated per bucket between flushes; a flush hands each bucket
@@ -63,6 +72,60 @@ func TestViewBatcherCapsPendingBuckets(t *testing.T) {
 	for _, d := range got {
 		if d.ReferrerHost == "h0.example" && d.Count != 2 {
 			t.Fatalf("pending bucket stopped counting at the cap: %+v", d)
+		}
+	}
+}
+
+// A media request from the instance's own pages counts the view but adds no
+// breakdown row; one from elsewhere records both.
+func TestMediaViewRecorderOwnReferer(t *testing.T) {
+	var got []store.ViewDelta
+	s := &Server{
+		cfg:      &config.Config{},
+		settings: settings.NewStatic(settings.Snapshot{PublicURL: "https://up.example"}),
+		views: newViewBatcher(func(_ context.Context, d []store.ViewDelta) error {
+			got = append(got, d...)
+			return nil
+		}),
+	}
+	request := func(referer string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/raw/abc.png", nil)
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
+	s.mediaViewRecorder(request("https://UP.example/s/abc"), "abc")()
+	s.mediaViewRecorder(request("https://discord.com/channels/1"), "abc")()
+	s.mediaViewRecorder(request(""), "abc")()
+
+	s.views.flush(context.Background())
+	var count, views int64
+	for _, d := range got {
+		if d.ReferrerHost == "up.example" {
+			t.Errorf("the instance's own host was recorded as a referrer: %+v", d)
+		}
+		count += d.Count
+		views += d.Views
+	}
+	if count != 2 || views != 3 {
+		t.Fatalf("recorded %d breakdown entries and %d views, want 2 and 3: %+v", count, views, got)
+	}
+}
+
+// A blank name is refused, not turned into "file".
+func TestRenameFileRejectsBlankName(t *testing.T) {
+	s := &Server{}
+	for _, body := range []string{`{}`, `{"name":"   "}`, `{"name":"\u0001\u0002"}`} {
+		req := httptest.NewRequest(http.MethodPatch, "/files/x", strings.NewReader(body))
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", uuid.NewString())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		req = req.WithContext(auth.WithUser(ctx, &store.User{ID: uuid.New()}))
+		rec := httptest.NewRecorder()
+		s.handleRenameFile(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("rename with body %s: status %d, want 400", body, rec.Code)
 		}
 	}
 }

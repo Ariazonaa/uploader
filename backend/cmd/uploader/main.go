@@ -145,7 +145,7 @@ func runServe() error {
 	encKey := cfg.EncryptionKey
 	if len(encKey) == 0 {
 		encKey = blobcrypt.DeriveKey(cfg.SessionBlockKey)
-		fmt.Println("uploader: warning — UPLOADER_ENCRYPTION_KEY is unset; the at-rest " +
+		fmt.Println("uploader: warning — UPLOADER_ENCRYPTION_KEY is not set; the at-rest " +
 			"blob key is derived from UPLOADER_SESSION_BLOCK_KEY. Rotating the session " +
 			"block key will make every encrypted blob AND every stored 2FA secret " +
 			"unreadable. Set an explicit key before enabling encryption in production.")
@@ -206,7 +206,7 @@ func runServe() error {
 		fileJanitor(rootCtx, st, blobs,
 			func() int { return set.Current().RetentionDaysInt() },
 			func() int { return set.Current().TrashRetentionDaysInt() },
-			filepath.Join(cfg.StorageFileRoot, ".tus"))
+			filepath.Join(cfg.StorageFileRoot, ".tus"), cfg.OrphanScanForce)
 	}()
 
 	// ListenAndServe returns ErrServerClosed the moment Shutdown *starts*, not
@@ -367,7 +367,7 @@ type stagingSweeper interface {
 // the trash after the retention window, and sweeps abandoned tus uploads,
 // staging files and leftover temp files every 15 minutes. The orphan-blob scan
 // runs on boot and then every orphanScanEvery.
-func fileJanitor(ctx context.Context, st *store.Store, blobs storage.Storage, retentionDays, trashRetentionDays func() int, tusDir string) {
+func fileJanitor(ctx context.Context, st *store.Store, blobs storage.Storage, retentionDays, trashRetentionDays func() int, tusDir string, forceOrphanScan bool) {
 	purge := func() {
 		// Not cancelled by shutdown: rows and their blobs go together, and
 		// runServe waits for a running pass. A DELETE cancelled after it
@@ -403,7 +403,7 @@ func fileJanitor(ctx context.Context, st *store.Store, blobs storage.Storage, re
 		}
 		if now := time.Now(); now.Sub(lastOrphanScan) >= orphanScanEvery {
 			lastOrphanScan = now
-			scanOrphans(ctx, st, blobs, now)
+			scanOrphans(ctx, st, blobs, now, forceOrphanScan)
 		}
 		sweepStaleTus(tusDir, time.Now())
 		sweepStaleTemp(os.TempDir(), time.Now())

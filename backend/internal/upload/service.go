@@ -3,6 +3,7 @@ package upload
 import (
 	"bytes"
 	"context"
+	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -133,31 +134,125 @@ func (s *Service) SaveWith(ctx context.Context, userID uuid.UUID, r io.Reader, f
 	}
 	filename = CleanFilename(filename)
 
-	// Sniff the content type from the first bytes rather than trusting the client.
-	sniff := make([]byte, 512)
-	n, err := io.ReadFull(r, sniff)
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+	mime, ext, body, err := s.sniff(r, filename)
+	if err != nil {
 		return store.File{}, err
 	}
-	sniff = sniff[:n]
-	mime := http.DetectContentType(sniff)
-	body := io.MultiReader(bytes.NewReader(sniff), r)
-
-	// Reject blocked MIME types up front (sniffed, never trusting the client).
-	if s.blocklist != nil && blockedContent(s.blocklist(), mime, sniff) {
-		return store.File{}, ErrBlockedType
-	}
-
-	ext := SanitizeExt(filename)
-	if ext == "" {
-		ext = extFromMime(mime)
-	}
-
 	slug, storageKey, deduped, err := s.reserveSlug(ctx, userID, filename, mime, ext, body, opts)
 	if err != nil {
 		return store.File{}, err
 	}
+	return s.finish(ctx, slug, storageKey, mime, deduped, opts)
+}
 
+// LocalSource is an upload that is already complete on local disk (a finished
+// resumable upload), for SaveFile.
+type LocalSource struct {
+	// Open returns the upload's plaintext from its start. It is called more
+	// than once.
+	Open func() (io.ReadCloser, error)
+	// Size is the plaintext length in bytes.
+	Size int64
+	// Path, when set, names a file that holds exactly that plaintext and sits
+	// on the storage's filesystem. A successful SaveFile may have moved it into
+	// storage, so the caller must not expect it to exist afterwards.
+	Path string
+}
+
+// SaveFile is SaveWith for an upload that is already on disk. SaveWith copies
+// its input twice, into a spool and from there into storage; for a finished
+// resumable upload of several GiB those copies ran inside the request that
+// sent the last byte and outlasted the reverse proxy's timeout. Here the file
+// is hashed where it lies and moved into storage (or, encrypted, written there
+// in one pass).
+//
+// A JPEG whose metadata is to be stripped takes the SaveWith route: stripping
+// rewrites the file anyway, and JPEGs are small.
+func (s *Service) SaveFile(ctx context.Context, userID uuid.UUID, src LocalSource, filename string, opts SaveOptions) (store.File, error) {
+	if opts.Encrypt && len(s.encKey) == 0 {
+		return store.File{}, ErrEncryptionUnavailable
+	}
+	filename = CleanFilename(filename)
+
+	r, err := src.Open()
+	if err != nil {
+		return store.File{}, err
+	}
+	mime, ext, body, err := s.sniff(r, filename)
+	if err != nil {
+		_ = r.Close()
+		return store.File{}, err
+	}
+	if media.IsJPEG(mime) && opts.StripEXIF {
+		slug, storageKey, deduped, err := s.reserveSlug(ctx, userID, filename, mime, ext, body, opts)
+		_ = r.Close()
+		if err != nil {
+			return store.File{}, err
+		}
+		return s.finish(ctx, slug, storageKey, mime, deduped, opts)
+	}
+	// Closed before the file is hashed and moved: an open handle keeps Windows
+	// from renaming it.
+	if err := r.Close(); err != nil {
+		return store.File{}, err
+	}
+
+	sp := spooled{open: src.Open, size: src.Size}
+	if !opts.Encrypt {
+		// Plaintext that is not on disk as a file is hashed through Open.
+		hash, err := hashSource(src)
+		if err != nil {
+			return store.File{}, err
+		}
+		sp.hash, sp.movePath = &hash, src.Path
+	}
+	slug, storageKey, deduped, err := s.commit(ctx, userID, filename, mime, ext, sp, opts)
+	if err != nil {
+		return store.File{}, err
+	}
+	return s.finish(ctx, slug, storageKey, mime, deduped, opts)
+}
+
+// hashSource returns the hex SHA-256 of src's plaintext.
+func hashSource(src LocalSource) (string, error) {
+	r, err := src.Open()
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// sniff detects the content type from the first bytes of r rather than
+// trusting the client, refuses blocked types, and picks the extension. body is
+// r from its start again.
+func (s *Service) sniff(r io.Reader, filename string) (mime, ext string, body io.Reader, err error) {
+	head := make([]byte, 512)
+	n, err := io.ReadFull(r, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", "", nil, err
+	}
+	head = head[:n]
+	mime = http.DetectContentType(head)
+
+	// Reject blocked MIME types up front (sniffed, never trusting the client).
+	if s.blocklist != nil && blockedContent(s.blocklist(), mime, head) {
+		return "", "", nil, ErrBlockedType
+	}
+	ext = SanitizeExt(filename)
+	if ext == "" {
+		ext = extFromMime(mime)
+	}
+	return mime, ext, io.MultiReader(bytes.NewReader(head), r), nil
+}
+
+// finish returns the stored file once its row and blob are committed, and
+// starts its post-processing.
+func (s *Service) finish(ctx context.Context, slug, storageKey, mime string, deduped bool, opts SaveOptions) (store.File, error) {
 	// Row and blob are committed. A client hanging up now must not turn the
 	// stored file into an error, nor skip its inline post-processing.
 	ctx = context.WithoutCancel(ctx)
@@ -280,7 +375,6 @@ func (s *Service) processHLS(ctx context.Context, fileID uuid.UUID, storageKey, 
 // deduplicated against an identical existing file of the same user.
 func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, mime, ext string, body io.Reader, opts SaveOptions) (string, string, bool, error) {
 	stripEXIF := opts.StripEXIF
-	customSlug := opts.CustomSlug
 	// Spool the upload to a temp file rather than holding it all in memory; a
 	// slug-collision retry re-reads from disk. EXIF stripping streams from this
 	// file into a second one, so no upload is ever held on the heap whole.
@@ -291,10 +385,22 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
+	// An upload that will be stored encrypted is spooled encrypted as well, see
+	// spool.go. spoolBlock is nil for a plaintext spool.
+	var spoolBlock cipher.Block
+	var spoolW io.Writer = tmp
+	if opts.Encrypt {
+		if spoolBlock, err = newSpoolBlock(); err != nil {
+			_ = tmp.Close()
+			return "", "", false, err
+		}
+		spoolW = newCTRFile(tmp, spoolBlock)
+	}
+
 	// The content hash for deduplication is taken while spooling rather than
 	// by reading the spooled file back.
 	hasher := sha256.New()
-	_, copyErr := io.Copy(io.MultiWriter(tmp, hasher), body)
+	_, copyErr := io.Copy(io.MultiWriter(spoolW, hasher), body)
 	closeErr := tmp.Close()
 	if copyErr != nil {
 		return "", "", false, copyErr
@@ -306,7 +412,12 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 	if media.IsJPEG(mime) && stripEXIF {
 		// Fails closed: a JPEG whose metadata cannot be removed is refused, never
 		// stored as uploaded (that would publish its GPS position).
-		clean, err := media.SanitizeJPEG(ctx, tmpName)
+		var clean string
+		if spoolBlock != nil {
+			clean, spoolBlock, err = sanitizeEncryptedSpool(ctx, tmpName, spoolBlock)
+		} else {
+			clean, err = media.SanitizeJPEG(ctx, tmpName)
+		}
 		if err != nil {
 			if errors.Is(err, media.ErrJPEGUnsanitizable) {
 				return "", "", false, fmt.Errorf("%w (%v)", ErrUnsanitizable, err)
@@ -319,12 +430,11 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 		hasher = nil // the stored content is the stripped file, hashed below
 	}
 
-	// Hash the final (post-strip) content for deduplication. A custom slug is an
-	// explicit request for a distinct named link, so it bypasses dedup. Encrypted
-	// uploads skip hashing+dedup entirely: the plaintext hash would leak content
+	// Hash the final (post-strip) content for deduplication. Encrypted uploads
+	// skip hashing+dedup entirely: the plaintext hash would leak content
 	// equality across encrypted blobs, and the stored ciphertext differs per
 	// upload anyway, so content_hash stays NULL.
-	var contentHash *string
+	sp := spooled{}
 	if !opts.Encrypt {
 		var hash string
 		if hasher != nil {
@@ -332,11 +442,55 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 		} else if hash, err = hashFile(tmpName); err != nil {
 			return "", "", false, err
 		}
-		contentHash = &hash
-		if customSlug == "" {
-			if existing, ok := s.dedupTarget(ctx, userID, hash); ok {
-				return existing.Slug, existing.StorageKey, true, nil
-			}
+		sp.hash = &hash
+	}
+	info, err := os.Stat(tmpName)
+	if err != nil {
+		return "", "", false, err
+	}
+	// size_bytes is always the PLAINTEXT length (the spool's, which CTR keeps),
+	// even for encrypted blobs whose on-disk size is header+tags larger.
+	sp.size = info.Size()
+	sp.open = func() (io.ReadCloser, error) {
+		f, err := os.Open(tmpName) // #nosec G304 -- our own temp file
+		if err != nil {
+			return nil, err
+		}
+		if spoolBlock == nil {
+			return f, nil
+		}
+		return readCloser{Reader: newCTRFile(f, spoolBlock), Closer: f}, nil
+	}
+	return s.commit(ctx, userID, filename, mime, ext, sp, opts)
+}
+
+// spooled is an upload's final content on local disk, ready to be stored.
+type spooled struct {
+	// open returns the plaintext from its start; a slug-collision retry opens
+	// it again.
+	open func() (io.ReadCloser, error)
+	size int64
+	// hash is the content's hex SHA-256; nil for an encrypted upload.
+	hash *string
+	// movePath, when set, is a plaintext file holding the content that may be
+	// moved into storage instead of being copied there.
+	movePath string
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// commit inserts the DB row for spooled content and stores its blob, retrying
+// on slug collision. Its results are reserveSlug's.
+func (s *Service) commit(ctx context.Context, userID uuid.UUID, filename, mime, ext string, sp spooled, opts SaveOptions) (string, string, bool, error) {
+	customSlug := opts.CustomSlug
+	// A custom slug is an explicit request for a distinct named link, so it
+	// bypasses dedup.
+	if sp.hash != nil && customSlug == "" {
+		if existing, ok := s.dedupTarget(ctx, userID, *sp.hash); ok {
+			return existing.Slug, existing.StorageKey, true, nil
 		}
 	}
 
@@ -346,12 +500,6 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 	if err != nil {
 		return "", "", false, err
 	}
-
-	info, err := os.Stat(tmpName)
-	if err != nil {
-		return "", "", false, err
-	}
-	size := info.Size()
 
 	// A custom slug gets a single attempt: a collision is a user-facing error
 	// (ErrSlugTaken), not something to paper over with a random slug.
@@ -382,13 +530,11 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 			Slug:         slug,
 			OriginalName: filename,
 			MimeType:     mime,
-			// size_bytes is always the PLAINTEXT length (from the temp file), even
-			// for encrypted blobs whose on-disk size is header+tags larger.
-			SizeBytes:   size,
-			StorageKey:  storageKey,
-			DeleteKey:   &deleteKey,
-			ContentHash: contentHash,
-			Encrypted:   opts.Encrypt,
+			SizeBytes:    sp.size,
+			StorageKey:   storageKey,
+			DeleteKey:    &deleteKey,
+			ContentHash:  sp.hash,
+			Encrypted:    opts.Encrypt,
 		})
 		if err != nil {
 			if isUniqueViolation(err) {
@@ -402,34 +548,43 @@ func (s *Service) reserveSlug(ctx context.Context, userID uuid.UUID, filename, m
 		}
 
 		// Row reserved → write the blob. If that fails, roll the row back so we
-		// don't leave a DB record pointing at a missing blob. When encrypting, the
-		// temp-file reader is wrapped so only ciphertext ever reaches storage.
-		// The body is spooled already, so the write no longer depends on the
-		// client and is not cut short by its hang-up.
-		blob, err := os.Open(tmpName)
-		if err != nil {
+		// don't leave a DB record pointing at a missing blob.
+		if err := s.storeBlob(ctx, storageKey, sp, opts.Encrypt); err != nil {
 			s.rollback(ctx, id)
 			return "", "", false, err
-		}
-		var src io.Reader = blob
-		if opts.Encrypt {
-			enc, encErr := blobcrypt.NewEncryptingReader(blob, s.encKey)
-			if encErr != nil {
-				_ = blob.Close()
-				s.rollback(ctx, id)
-				return "", "", false, encErr
-			}
-			src = enc
-		}
-		_, putErr := s.storage.Put(context.WithoutCancel(ctx), storageKey, src)
-		_ = blob.Close()
-		if putErr != nil {
-			s.rollback(ctx, id)
-			return "", "", false, putErr
 		}
 		return slug, storageKey, false, nil
 	}
 	return "", "", false, errors.Join(errors.New("could not allocate unique slug"), lastErr)
+}
+
+// storeBlob writes spooled content to storage under key. When encrypting, the
+// reader is wrapped so only ciphertext ever reaches storage. The content is on
+// local disk already, so the write no longer depends on the client and is not
+// cut short by its hang-up.
+func (s *Service) storeBlob(ctx context.Context, key string, sp spooled, encrypt bool) error {
+	ctx = context.WithoutCancel(ctx)
+	if sp.movePath != "" && !encrypt {
+		if mv, ok := s.storage.(storage.Importer); ok {
+			if err := mv.Import(ctx, key, sp.movePath); err == nil {
+				return nil
+			}
+			// Not movable after all (another filesystem, …): copy it instead.
+		}
+	}
+	blob, err := sp.open()
+	if err != nil {
+		return err
+	}
+	defer blob.Close()
+	var src io.Reader = blob
+	if encrypt {
+		if src, err = blobcrypt.NewEncryptingReader(blob, s.encKey); err != nil {
+			return err
+		}
+	}
+	_, err = s.storage.Put(ctx, key, src)
+	return err
 }
 
 // dedupTarget returns the user's existing copy of an upload's content, if it is

@@ -210,6 +210,7 @@ Configuration is split into two kinds of settings.
 | `UPLOADER_REGISTRATION` | `off` | `off` or `invite` (anyone with a valid invite code can register). |
 | `UPLOADER_TRUST_PROXY` | `true` in Compose, `false` in the binary | Honour `X-Forwarded-*` headers. See [Reverse proxy and client IPs](#reverse-proxy-and-client-ips). |
 | `UPLOADER_CLIENT_IP_HEADER` | *empty* | Read the client IP only from this header (for example `X-Real-IP` or `CF-Connecting-IP`). |
+| `UPLOADER_ORPHAN_SCAN_FORCE` | `false` | The cleanup of stored files without a database row refuses to delete when most of the storage looks orphaned, which normally means an empty or the wrong database (for example a start before the dump was restored). Set to `true` for one start if the database is the right one. |
 | `UPLOADER_SECURE_COOKIES` | `true` | Set to `false` only for plain-HTTP testing. |
 | `UPLOADER_SESSION_TTL` | `720h` | Session lifetime. |
 | `UPLOADER_SLUG_LENGTH` | `6` | Length of random slugs (minimum 4). |

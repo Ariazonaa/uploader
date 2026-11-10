@@ -60,6 +60,7 @@ services:
       # --- Optional: only passed through when set in .env ---------------------
       - UPLOADER_ENCRYPTION_KEY
       - UPLOADER_CLIENT_IP_HEADER
+      - UPLOADER_ORPHAN_SCAN_FORCE
       - UPLOADER_REGISTRATION
       - UPLOADER_VAPID_PUBLIC_KEY
       - UPLOADER_VAPID_PRIVATE_KEY

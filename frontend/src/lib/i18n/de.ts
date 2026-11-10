@@ -92,7 +92,7 @@ export const de: Record<MessageKey, string> = {
   "uploader.encrypt": "Verschlüsseln",
   "uploader.copiedLink": "Link kopiert",
   "uploader.secondsLeft": "noch {n}s",
-  "uploader.slugIgnored": "Eigener Link gilt nur für eine einzelne Datei unter 10 MiB — ignoriert",
+  "uploader.slugIgnored": "Eigener Link gilt nur für eine einzelne Datei — ignoriert",
   "uploader.invalidResponse": "Ungültige Server-Antwort",
   "uploader.uploadFailed": "Upload fehlgeschlagen ({status})",
   "uploader.networkError": "Netzwerkfehler",

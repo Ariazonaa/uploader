@@ -218,6 +218,7 @@ Es gibt zwei Arten von Einstellungen.
 | `UPLOADER_REGISTRATION` | `off` | `off` oder `invite` (wer einen gültigen Einladungscode hat, kann sich registrieren). |
 | `UPLOADER_TRUST_PROXY` | `true` in Compose, `false` im Binary | `X-Forwarded-*`-Header auswerten. Siehe [Reverse-Proxy und Client-IPs](#reverse-proxy-und-client-ips). |
 | `UPLOADER_CLIENT_IP_HEADER` | *leer* | Client-IP nur aus diesem Header lesen (z. B. `X-Real-IP` oder `CF-Connecting-IP`). |
+| `UPLOADER_ORPHAN_SCAN_FORCE` | `false` | Das Aufräumen gespeicherter Dateien ohne Datenbankzeile löscht nichts, wenn der Großteil des Speichers verwaist aussieht. Das bedeutet normalerweise eine leere oder die falsche Datenbank (z. B. ein Start, bevor der Dump eingespielt ist). Für einen Start auf `true` setzen, wenn die Datenbank die richtige ist. |
 | `UPLOADER_SECURE_COOKIES` | `true` | Nur zum Testen über reines HTTP auf `false` setzen. |
 | `UPLOADER_SESSION_TTL` | `720h` | Lebensdauer einer Sitzung. |
 | `UPLOADER_SLUG_LENGTH` | `6` | Länge zufälliger Slugs (mindestens 4). |

@@ -81,3 +81,29 @@ func TestLoadTypedValues(t *testing.T) {
 		t.Errorf("values not applied: TrustProxy=%v SessionTTL=%v SlugLength=%d", c.TrustProxy, c.SessionTTL, c.SlugLength)
 	}
 }
+
+// A set but malformed encryption key fails Load. It used to be dropped, so the
+// blob key silently fell back to the one derived from the session block key.
+func TestLoadEncryptionKey(t *testing.T) {
+	setRequired(t)
+	for _, bad := range []string{
+		"MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=", // base64, not hex
+		strings.Repeat("ab", 31) + "a",                 // odd length
+		strings.Repeat("ab", 16),                       // 16 bytes
+	} {
+		t.Setenv(envPrefix+"ENCRYPTION_KEY", bad)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ENCRYPTION_KEY") {
+			t.Errorf("ENCRYPTION_KEY=%q: err = %v, want a problem naming the variable", bad, err)
+		}
+	}
+	t.Setenv(envPrefix+"ENCRYPTION_KEY", " "+strings.Repeat("ef", 32)+" ")
+	c, err := Load()
+	if err != nil || len(c.EncryptionKey) != 32 {
+		t.Fatalf("valid key: err %v, %d key bytes; want 32", err, len(c.EncryptionKey))
+	}
+	t.Setenv(envPrefix+"ENCRYPTION_KEY", "")
+	c, err = Load()
+	if err != nil || c.EncryptionKey != nil {
+		t.Fatalf("empty key: err %v, key %x; want unset", err, c.EncryptionKey)
+	}
+}

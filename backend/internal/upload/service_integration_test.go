@@ -197,3 +197,116 @@ func TestSlugCollisionIgnoresCase(t *testing.T) {
 		t.Fatalf("random slug colliding with %q in case only: got %q, %v; want a re-roll to fresh1", taken.Slug, f.Slug, err)
 	}
 }
+
+// localSource is a LocalSource over a plaintext file at path.
+func localSource(t *testing.T, path string, movable bool) LocalSource {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := LocalSource{Size: info.Size(), Open: func() (io.ReadCloser, error) { return os.Open(path) }}
+	if movable {
+		src.Path = path
+	}
+	return src
+}
+
+// SaveFile moves a finished upload into storage instead of copying it, stores
+// the same row SaveWith would, and deduplicates like it.
+func TestSaveFileMovesTheFile(t *testing.T) {
+	pool, _ := dbtest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	st := store.New(pool)
+	root := t.TempDir()
+	fs, err := storage.NewFileStorage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := store.User{ID: uuid.New(), Username: "up", Email: "up@example.com", PasswordHash: "x"}
+	if err := st.CreateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(st, fs, 6)
+	scratch := func(content string) string {
+		f, err := os.CreateTemp(root, "scratch-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(content); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return f.Name()
+	}
+	read := func(key string) string {
+		rc, err := fs.Open(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		b, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	path := scratch("hello resumable world")
+	f, err := svc.SaveFile(ctx, u.ID, localSource(t, path, true), "a.txt", SaveOptions{})
+	if err != nil {
+		t.Fatalf("SaveFile: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the scratch file was copied, not moved (stat err %v)", err)
+	}
+	if got := read(f.StorageKey); got != "hello resumable world" {
+		t.Errorf("stored blob = %q", got)
+	}
+	if f.SizeBytes != int64(len("hello resumable world")) || f.ContentHash == nil || f.Encrypted {
+		t.Errorf("row = size %d, hash %v, encrypted %v", f.SizeBytes, f.ContentHash, f.Encrypted)
+	}
+
+	// The same content again is deduplicated, and its scratch file left alone.
+	path = scratch("hello resumable world")
+	dup, err := svc.SaveFile(ctx, u.ID, localSource(t, path, true), "b.txt", SaveOptions{})
+	if err != nil || dup.ID != f.ID {
+		t.Fatalf("second SaveFile: id %v, err %v; want the first file %v", dup.ID, err, f.ID)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a deduplicated upload's scratch file was moved: %v", err)
+	}
+
+	// Without a path the content is copied through Open.
+	path = scratch("copied through open")
+	c, err := svc.SaveFile(ctx, u.ID, localSource(t, path, false), "c.txt", SaveOptions{})
+	if err != nil {
+		t.Fatalf("SaveFile without a path: %v", err)
+	}
+	if got := read(c.StorageKey); got != "copied through open" {
+		t.Errorf("stored blob = %q", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a source without a path was moved: %v", err)
+	}
+
+	// Encrypted: never moved (the file is plaintext), stored as ciphertext.
+	svc.SetEncryptionKey([]byte(strings.Repeat("k", 32)))
+	path = scratch("secret resumable upload")
+	e, err := svc.SaveFile(ctx, u.ID, localSource(t, path, true), "d.txt", SaveOptions{Encrypt: true})
+	if err != nil {
+		t.Fatalf("SaveFile encrypted: %v", err)
+	}
+	if !e.Encrypted || e.ContentHash != nil || e.SizeBytes != int64(len("secret resumable upload")) {
+		t.Errorf("row = encrypted %v, hash %v, size %d", e.Encrypted, e.ContentHash, e.SizeBytes)
+	}
+	if strings.Contains(read(e.StorageKey), "secret") {
+		t.Error("an encrypted upload was stored in plaintext")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("an encrypted upload's plaintext file was moved into storage: %v", err)
+	}
+}

@@ -82,6 +82,15 @@ func SanitizeJPEG(ctx context.Context, srcPath string) (string, error) {
 	return outPath, nil
 }
 
+// SanitizeJPEGStream is SanitizeJPEG on an open source and output, for callers
+// whose files are not plain (an encrypted spool). out must be empty.
+func SanitizeJPEGStream(ctx context.Context, out Rewritable, src io.ReadSeeker) error {
+	return sanitizeJPEG(ctx, out, src)
+}
+
+// Rewritable is the output of SanitizeJPEGStream.
+type Rewritable = rewritable
+
 // rewritable is the output of sanitizeJPEG, which starts over on it when the
 // lossless strip fails.
 type rewritable interface {

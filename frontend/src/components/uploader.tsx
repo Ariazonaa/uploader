@@ -243,10 +243,9 @@ export function Uploader() {
 
   const onDrop = useCallback(
     async (files: File[]) => {
-      // A custom slug only makes sense for a single file, and only on the simple
-      // (non-resumable) path — tus uploads don't carry it.
+      // A custom slug only makes sense for a single file.
       const wantSlug = slugRef.current.trim();
-      const useSlug = files.length === 1 && wantSlug && files[0].size < TUS_THRESHOLD ? wantSlug : "";
+      const useSlug = files.length === 1 ? wantSlug : "";
       if (wantSlug && !useSlug) {
         toast(tGlobal("uploader.slugIgnored"), "error");
       }
@@ -267,7 +266,7 @@ export function Uploader() {
             const res = await runUpload(() => {
               if (ctrl.signal.aborted) throw abortError(); // cancelled while queued
               return file.size >= TUS_THRESHOLD
-                ? tusUpload(file, onProgress, { encrypt: useEncrypt, signal: ctrl.signal })
+                ? tusUpload(file, onProgress, { encrypt: useEncrypt, slug: useSlug, signal: ctrl.signal })
                 : uploadFileWithRetry(file, onProgress, useSlug, useEncrypt, ctrl.signal);
             });
             const copied = await copyToClipboard(res.url);

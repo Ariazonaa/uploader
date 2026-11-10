@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"log"
 	"path"
 	"strings"
 	"time"
@@ -30,22 +32,80 @@ var (
 	orphanDirBatch = 100
 )
 
+// The orphan scan deletes what the database does not know, so a database that
+// knows nothing (a fresh one, started before the dump was restored) or too
+// little (an older dump) makes the whole blob store look orphaned. Real orphans
+// come from crashes and interrupted purges and are few. So a pass that finds
+// at least orphanMassMin orphans making up more than half of everything it
+// looked at deletes nothing and says so; UPLOADER_ORPHAN_SCAN_FORCE=true lifts
+// the check for the rare legitimate case. Variables so tests can lower them.
+var (
+	orphanMassMin = 50
+	// orphanHoldMax bounds the orphans one pass remembers before it decides
+	// (deletion waits for the end of the walk, when the ratio is known). More
+	// than this many is refused like a majority.
+	orphanHoldMax = 20000
+)
+
 // orphanStore is the part of *store.Store the orphan scan reads.
 type orphanStore interface {
 	ReferencedKeys(ctx context.Context, keys []string) (map[string]struct{}, error)
 	ExistingSlugs(ctx context.Context, slugs []string) (map[string]struct{}, error)
 }
 
+// errOrphanOverflow ends the walk once more orphans were found than a guarded
+// pass holds.
+var errOrphanOverflow = errors.New("too many orphans")
+
+// orphanSweep collects what one pass found orphaned. A blob and an HLS
+// rendition directory each count as one unit.
+type orphanSweep struct {
+	force bool
+	blobs storage.Storage
+	total int      // units looked at
+	found int      // of those, orphaned and past the grace period
+	keys  []string // orphaned blobs, held until the pass decides
+	dirs  []string // orphaned rendition directories, likewise
+}
+
+// orphan records one orphaned blob (dir false) or rendition directory. Under
+// force it is deleted at once; otherwise it is held for the decision at the
+// end of the pass.
+func (o *orphanSweep) orphan(ctx context.Context, key string, dir bool) error {
+	o.found++
+	switch {
+	case o.force && dir:
+		_ = o.blobs.DeletePrefix(ctx, key)
+	case o.force:
+		_ = o.blobs.Delete(ctx, key)
+	case o.found > orphanHoldMax:
+		return errOrphanOverflow
+	case dir:
+		o.dirs = append(o.dirs, key)
+	default:
+		o.keys = append(o.keys, key)
+	}
+	return nil
+}
+
+// suspicious reports whether the orphans found look like a database that does
+// not belong to this blob store rather than like leftovers.
+func (o *orphanSweep) suspicious() bool {
+	return o.found > orphanHoldMax || (o.found >= orphanMassMin && o.found*2 > o.total)
+}
+
 // scanOrphans removes blobs on disk that no DB row references anymore (e.g.
 // after a crash between blob write and row insert), and HLS renditions whose
-// file row is gone. Best-effort; it stops early once ctx is cancelled or a
-// database check fails. snapshotAt must be taken before the database is read.
+// file row is gone. Best-effort; a pass that is cancelled or whose database
+// check fails deletes nothing. snapshotAt must be taken before the database is
+// read. Unless force is set, a pass that finds most of the store orphaned
+// deletes nothing either (see orphanMassMin).
 //
 // The tree is streamed, not listed: keys are checked against the database a
 // batch at a time, and only the few that no row references are stat'ed. The
 // scan used to load every key of the table and of the disk into memory and
 // stat every HLS segment on each pass.
-func scanOrphans(ctx context.Context, st orphanStore, blobs storage.Storage, snapshotAt time.Time) {
+func scanOrphans(ctx context.Context, st orphanStore, blobs storage.Storage, snapshotAt time.Time, force bool) {
 	// A freshly written blob may belong to a row that is about to reference
 	// it: media post-processing stores the thumbnail first and only then sets
 	// thumb_key. Scanning in that window used to delete the new thumbnail and
@@ -57,6 +117,7 @@ func scanOrphans(ctx context.Context, st orphanStore, blobs storage.Storage, sna
 	// batched checks below all read the database after snapshotAt, so they
 	// see every row a blob older than the cutoff could belong to.
 	cutoff := snapshotAt.Add(-orphanGrace)
+	sweep := &orphanSweep{force: force, blobs: blobs}
 	var batch []string
 	renditions := map[string][]string{} // rendition dir → its keys
 
@@ -72,18 +133,21 @@ func scanOrphans(ctx context.Context, st orphanStore, blobs storage.Storage, sna
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			sweep.total++
 			if _, ok := referenced[k]; ok {
 				continue
 			}
 			if olderThan(ctx, blobs, k, cutoff) {
-				_ = blobs.Delete(ctx, k)
+				if err := sweep.orphan(ctx, k, false); err != nil {
+					return err
+				}
 			}
 		}
 		batch = batch[:0]
 		return nil
 	}
 	checkRenditions := func() error {
-		err := scanOrphanRenditions(ctx, st, blobs, renditions, cutoff)
+		err := scanOrphanRenditions(ctx, st, blobs, renditions, cutoff, sweep)
 		renditions = map[string][]string{}
 		return err
 	}
@@ -110,20 +174,48 @@ func scanOrphans(ctx context.Context, st orphanStore, blobs storage.Storage, sna
 		}
 		return nil
 	})
-	if err != nil || checkBlobs() != nil {
+	if err == nil {
+		err = checkBlobs()
+	}
+	if err == nil {
+		err = checkRenditions()
+	}
+	if force {
+		return // deleted along the way
+	}
+	if errors.Is(err, errOrphanOverflow) || (err == nil && sweep.suspicious()) {
+		log.Printf("orphan scan: REFUSING to delete: %d of the %d blobs checked so far have no database row. "+
+			"That looks like an empty, older or wrong database rather than leftovers, so nothing was deleted. "+
+			"If the database is the right one, start once with UPLOADER_ORPHAN_SCAN_FORCE=true to collect them.",
+			sweep.found, sweep.total)
 		return
 	}
-	_ = checkRenditions()
+	if err != nil {
+		return // an incomplete pass cannot judge the ratio
+	}
+	for _, k := range sweep.keys {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = blobs.Delete(ctx, k)
+	}
+	for _, dir := range sweep.dirs {
+		if ctx.Err() != nil {
+			return
+		}
+		_ = blobs.DeletePrefix(ctx, dir)
+	}
 }
 
-// scanOrphanRenditions removes HLS rendition directories whose slug has no
-// file row (trashed files keep theirs) once every file in them is past cutoff.
+// scanOrphanRenditions reports to sweep the HLS rendition directories whose
+// slug has no file row (trashed files keep theirs) once every file in them is
+// past cutoff.
 // Renditions are derived from a file and referenced by slug, not storage key.
 // Every purge deletes them, but a purge cut short between deleting the rows and
 // their blobs, or a transcode whose final row check failed, left them behind
 // for good while the scan skipped hls/ entirely. Only the segments of dead
 // renditions are stat'ed.
-func scanOrphanRenditions(ctx context.Context, st orphanStore, blobs storage.Storage, renditions map[string][]string, cutoff time.Time) error {
+func scanOrphanRenditions(ctx context.Context, st orphanStore, blobs storage.Storage, renditions map[string][]string, cutoff time.Time, sweep *orphanSweep) error {
 	if len(renditions) == 0 {
 		return nil
 	}
@@ -136,6 +228,7 @@ func scanOrphanRenditions(ctx context.Context, st orphanStore, blobs storage.Sto
 		return err
 	}
 	for dir, keys := range renditions {
+		sweep.total++
 		if _, ok := live[path.Base(dir)]; ok {
 			continue
 		}
@@ -150,7 +243,9 @@ func scanOrphanRenditions(ctx context.Context, st orphanStore, blobs storage.Sto
 			}
 		}
 		if stale {
-			_ = blobs.DeletePrefix(ctx, dir)
+			if err := sweep.orphan(ctx, dir, true); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -158,7 +158,7 @@ var (
 	tusUserLocks = newKeyedMutex()
 )
 
-// tusSaveHook replaces upload.Service.SaveWith in tests (no Postgres there).
+// tusSaveHook replaces upload.Service.SaveFile in tests (no Postgres there).
 // Always nil in production.
 var tusSaveHook func(ctx context.Context, userID uuid.UUID, r io.Reader, filename string, opts upload.SaveOptions) (store.File, error)
 
@@ -262,6 +262,15 @@ func (s *Server) handleTusCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// A custom slug that is taken is refused before the client sends the file,
+	// not after. Best effort: the final Save decides (it also catches a slug
+	// taken meanwhile and one that differs only in case).
+	if opts.CustomSlug != "" && s.store != nil {
+		if taken, err := s.store.ExistingSlugs(r.Context(), []string{opts.CustomSlug}); err == nil && len(taken) > 0 {
+			writeErr(w, http.StatusConflict, "that slug is already taken")
+			return
+		}
 	}
 	// Refuse up front rather than after the client has sent every byte: without
 	// a key the final Save would fail with ErrEncryptionUnavailable anyway.
@@ -521,16 +530,37 @@ func (s *Server) finalizeTus(ctx context.Context, userID uuid.UUID, id string, i
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tusFinalizeTimeout)
 	defer cancel()
-	save := s.uploads.SaveWith
-	if tusSaveHook != nil {
-		save = tusSaveHook
+	// Closed before the save: the data file is moved into storage where it can
+	// be, and an open handle keeps Windows from renaming it.
+	_ = f.Close()
+	bin := s.tusPath(id, "bin")
+	src := upload.LocalSource{Size: info.Length, Open: func() (io.ReadCloser, error) {
+		f, err := os.Open(bin) // #nosec G304 -- id passed tusID
+		if err != nil {
+			return nil, err
+		}
+		r, err := s.tusScratchReader(id, info, f)
+		if err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		return tusReadCloser{Reader: r, Closer: f}, nil
+	}}
+	// An encrypted scratch is no plaintext file; it is stored through Open.
+	if info.ScratchKey == "" {
+		src.Path = bin
 	}
 	var saved store.File
-	src, saveErr := s.tusScratchReader(id, info, f)
-	if saveErr == nil {
-		saved, saveErr = save(ctx, userID, src, info.Filename, s.tusSaveOptions(info))
+	var saveErr error
+	if tusSaveHook != nil {
+		var r io.ReadCloser
+		if r, saveErr = src.Open(); saveErr == nil {
+			saved, saveErr = tusSaveHook(ctx, userID, r, info.Filename, s.tusSaveOptions(info))
+			_ = r.Close()
+		}
+	} else {
+		saved, saveErr = s.uploads.SaveFile(ctx, userID, src, info.Filename, s.tusSaveOptions(info))
 	}
-	_ = f.Close()
 
 	if saveErr != nil {
 		if tusPermanentError(saveErr) {
@@ -560,6 +590,11 @@ func (s *Server) finalizeTus(ctx context.Context, userID uuid.UUID, id string, i
 	_ = os.Remove(s.tusPath(id, "bin"))
 	_ = os.Remove(s.tusPath(id, "json"))
 	return done, 0, ""
+}
+
+type tusReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // tusPermanentError reports whether a Save error is final, i.e. retrying the

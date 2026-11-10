@@ -59,12 +59,17 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: uploader:scan
+          # APK_REFRESH: see the Dockerfile. The same value in both builds, so
+          # the pushed image reuses the layer that was scanned.
+          build-args: APK_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Trivy scan
         # Pinned to a commit rather than a movable tag (a third-party action
-        # that runs with access to the build); Dependabot keeps it current.
+        # that runs with access to the build). Nothing moves the pin: Dependabot
+        # version updates are off (.github/dependabot.yml), so bump it by hand
+        # together with the other dependencies.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: uploader:scan
@@ -90,6 +95,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # 1.2.3 for a release tag, otherwise the branch name (main).
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            APK_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

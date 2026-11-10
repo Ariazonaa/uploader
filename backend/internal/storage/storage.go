@@ -20,6 +20,14 @@ type Stat struct {
 //
 // Keys are caller-controlled relative paths (e.g. "ab/cd/abcdef.png").
 // Implementations MUST reject keys that escape their root.
+// Importer is implemented by a Storage that can take over a file of its own
+// filesystem without copying it.
+type Importer interface {
+	// Import moves the file at srcPath to key. On an error the file is still
+	// at srcPath, and the caller may fall back to Put.
+	Import(ctx context.Context, key, srcPath string) error
+}
+
 type Storage interface {
 	// Put writes r under key, creating intermediate structure as needed, and
 	// returns the number of bytes written.

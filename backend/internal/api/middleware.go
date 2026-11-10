@@ -297,6 +297,11 @@ type serverLimiters struct {
 	loginAccountAll *keyedRateLimiter
 	// totpAccount throttles failed second-factor attempts per account.
 	totpAccount *keyedRateLimiter
+	// totpAccountSlow is the long-term budget behind totpAccount. The fast
+	// bucket alone refills for ever, which leaves someone who has the password
+	// 720 guesses a day; this one is not reset by a successful login and
+	// refills by the hour.
+	totpAccountSlow *keyedRateLimiter
 	// pendingToken caps attempts per pending-2FA token and makes the token
 	// single-use after success; the token itself is stateless and valid for 5
 	// minutes, so without this it could be replayed freely within that window.
@@ -317,6 +322,13 @@ const (
 	// Failed 2FA codes per account: 5 at once, then one per two minutes.
 	totpAccountBurst = 5
 	totpAccountEvery = 2 * time.Minute
+	// ... and over time: 30 failures at once, then one per hour. A code matches
+	// one of three time steps, so 24 guesses a day are a chance of well under
+	// 3 % per year, where the fast bucket's 720 a day came to more than half.
+	// The owner's own typos (5 per login at most, see pendingTokenAttempts)
+	// do not get near it.
+	totpAccountSlowBurst = 30
+	totpAccountSlowEvery = time.Hour
 	// Code attempts per pending-2FA token before the user must log in again.
 	pendingTokenAttempts = 5
 )
@@ -329,9 +341,18 @@ func newServerLimiters() *serverLimiters {
 		loginAccount:    newKeyedRateLimiter(rate.Every(loginAccountEvery), loginAccountBurst),
 		loginAccountAll: newKeyedRateLimiter(rate.Every(loginAccountAllEvery), loginAccountAllBurst),
 		totpAccount:     newKeyedRateLimiter(rate.Every(totpAccountEvery), totpAccountBurst),
+		totpAccountSlow: newTOTPSlowLimiter(),
 		pendingToken:    pending,
 		pushTest:        newKeyedRateLimiter(rate.Every(20*time.Second), 3),
 	}
+}
+
+// newTOTPSlowLimiter builds the long-term 2FA budget. Its entries must outlive
+// the default idle sweep, or an attacker would get a fresh budget by pausing.
+func newTOTPSlowLimiter() *keyedRateLimiter {
+	l := newKeyedRateLimiter(rate.Every(totpAccountSlowEvery), totpAccountSlowBurst)
+	l.idleTTL = totpAccountSlowBurst * totpAccountSlowEvery
+	return l
 }
 
 // limiters returns the server's handler-level throttles, creating them on first

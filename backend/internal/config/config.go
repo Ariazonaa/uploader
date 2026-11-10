@@ -64,9 +64,13 @@ type Config struct {
 
 	// EncryptionKey is the 32-byte at-rest blob-encryption key, supplied as 64 hex
 	// chars (UPLOADER_ENCRYPTION_KEY). Optional: when empty, the key is derived
-	// from SessionBlockKey. Parsed leniently — a malformed value is treated as
-	// unset rather than failing startup.
+	// from SessionBlockKey. A value that is set but malformed fails Load.
 	EncryptionKey []byte
+
+	// OrphanScanForce (UPLOADER_ORPHAN_SCAN_FORCE) lets the orphan scan delete
+	// even when most of the blob store has no database row. Off by default: that
+	// picture normally means an empty or the wrong database, see scanOrphans.
+	OrphanScanForce bool
 
 	// RetentionDays seeds the runtime "retention_days" setting: when > 0, the
 	// janitor auto-deletes files older than this many days (from storage + DB).
@@ -144,6 +148,7 @@ func Load() (*Config, error) {
 		SessionTTL:         envDuration("SESSION_TTL", 720*time.Hour, &problems),
 		SecureCookies:      envBool("SECURE_COOKIES", true, &problems),
 		TrustProxy:         envBool("TRUST_PROXY", false, &problems),
+		OrphanScanForce:    envBool("ORPHAN_SCAN_FORCE", false, &problems),
 		StorageFileRoot:    env("STORAGE_FILE_ROOT", "./data/files"),
 		SlugLength:         int(envInt64("SLUG_LENGTH", 6, &problems)),
 		RegistrationMode:   strings.ToLower(strings.TrimSpace(env("REGISTRATION", "off"))),
@@ -193,11 +198,20 @@ func Load() (*Config, error) {
 	}
 	c.SessionBlockKey = blockKey
 
-	// Optional at-rest encryption key: 64 hex chars → 32 bytes. Parsed leniently
-	// (empty or malformed → unset), so the key falls back to one derived from the
-	// session block key at startup rather than failing to boot.
+	// Optional at-rest encryption key: 64 hex chars → 32 bytes. Empty means
+	// unset (the key is then derived from the session block key at startup). A
+	// value that is set but malformed is an error like any other: it used to be
+	// dropped silently, so blobs were sealed under the derived key while the
+	// operator believed the explicit one was in use, and correcting the value
+	// later made every one of them undecryptable.
 	if raw := strings.TrimSpace(env("ENCRYPTION_KEY", "")); raw != "" {
-		if key, decErr := hex.DecodeString(raw); decErr == nil && len(key) == 32 {
+		key, decErr := hex.DecodeString(raw)
+		switch {
+		case decErr != nil:
+			problems = append(problems, envPrefix+"ENCRYPTION_KEY must be valid hex (64 hex chars = 32 bytes; generate with: openssl rand -hex 32)")
+		case len(key) != 32:
+			problems = append(problems, fmt.Sprintf("%sENCRYPTION_KEY must decode to 32 bytes, got %d", envPrefix, len(key)))
+		default:
 			c.EncryptionKey = key
 		}
 	}

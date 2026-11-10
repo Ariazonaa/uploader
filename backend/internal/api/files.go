@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -133,8 +135,12 @@ func (s *Server) handleRenameFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	name := sanitizeFilename(req.Name)
-	if name == "" || len([]rune(name)) > 255 {
+	// CleanFilename answers "file" for a name with nothing usable in it (empty,
+	// blank, only control characters). Taking that used to rename the file to
+	// "file" and drop its extension instead of refusing the request.
+	raw := strings.TrimSpace(req.Name)
+	name := upload.CleanFilename(raw)
+	if raw == "" || utf8.RuneCountInString(raw) > 255 || (name == "file" && raw != "file") {
 		writeErr(w, http.StatusBadRequest, "name must be 1–255 characters")
 		return
 	}
@@ -255,7 +261,9 @@ func (s *Server) handlePurgeFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "file not in trash")
 		return
 	}
-	s.purgeFileBlobs(r.Context(), f)
+	// The row is gone, so the blobs must go whatever happens to the request:
+	// on a cancelled context they would stay until the next orphan scan.
+	s.purgeFileBlobs(context.WithoutCancel(r.Context()), f)
 	s.audit(r, store.AuditFilePurge, f.Slug, nil)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -268,8 +276,11 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not empty trash")
 		return
 	}
+	// Detached from the request: emptying a large trash outlasts a closed tab
+	// or a proxy timeout, and the rows are already deleted.
+	purgeCtx := context.WithoutCancel(r.Context())
 	for _, f := range files {
-		s.purgeFileBlobs(r.Context(), f)
+		s.purgeFileBlobs(purgeCtx, f)
 	}
 	s.audit(r, store.AuditFilePurge, "empty-trash", map[string]any{"count": len(files)})
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": len(files)})

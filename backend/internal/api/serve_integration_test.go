@@ -238,7 +238,7 @@ func TestHLSPlaylistPinsSegmentsToTheFile(t *testing.T) {
 	}
 
 	rec = e.do(http.MethodGet, base+"seg000.ts?v="+f.ID.String(), nil)
-	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != hlsSegmentCacheControl {
 		t.Fatalf("versioned segment: status %d, Cache-Control %q", rec.Code, rec.Header().Get("Cache-Control"))
 	}
 	if rec := e.do(http.MethodGet, base+"seg000.ts?v="+uuid.NewString(), nil); rec.Code != http.StatusNotFound {

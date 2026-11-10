@@ -54,6 +54,20 @@ func writeErrorPage(w http.ResponseWriter, status int, message string) {
 	})
 }
 
+// Cache lifetimes of the public media routes. A deleted file answers 404 at
+// once, but every cache that already holds it keeps serving it for as long as
+// these say, and nothing here can purge a CDN or a browser. /raw used to be
+// cacheable for a week and HLS segments for a year as immutable, so a file
+// deleted because it showed a secret stayed reachable through a shared cache
+// for that long. Minutes keep a burst of embeds off the origin; after that a
+// cache revalidates with the ETag, which costs a 304 and no body.
+const (
+	mediaCacheControl = "public, max-age=300, must-revalidate"
+	// Segments carry the file id in their URL, so they never change, but they
+	// are reachable without the playlist by anyone who has seen the URLs.
+	hlsSegmentCacheControl = "public, max-age=3600"
+)
+
 // slugFromParam strips an optional file extension from a raw-URL slug. Raw URLs
 // may end in the real extension (e.g. /raw/aB3kdq.mp4) so chat clients
 // auto-embed the media; slugs themselves never contain '.', so any dot marks the
@@ -107,19 +121,16 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", f.MimeType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	allowCrossOriginEmbed(w)
-	// A week of caching with revalidation: long enough to be CDN/Discord friendly,
-	// short enough that a purged-then-reused slug self-heals.
+	w.Header().Set("Cache-Control", mediaCacheControl)
 	if f.ContentHash != nil && *f.ContentHash != "" {
 		// Strong ETag derived from the content hash → conditional requests
 		// (If-None-Match) get a cheap 304; http.ServeContent does the comparison.
 		// It is an HMAC, not the bare hash — see Server.etagFor.
 		w.Header().Set("ETag", `"`+s.etagFor(*f.ContentHash)+`"`)
-		w.Header().Set("Cache-Control", "public, max-age=604800, must-revalidate")
 	} else {
 		// Encrypted blobs carry no content hash; fall back to a weak validator
 		// (size+modtime) so conditional requests can still 304, like handleThumb.
 		w.Header().Set("ETag", fmt.Sprintf(`W/"r-%x-%x"`, stat.Size, stat.ModTime.Unix()))
-		w.Header().Set("Cache-Control", "public, max-age=604800, must-revalidate")
 	}
 	disposition := "inline"
 	if isDangerousInline(f.MimeType) {
@@ -134,10 +145,10 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	out := w
 	if r.Method == http.MethodGet {
 		fromStart := rangeFromStart(r.Header.Get("Range"))
-		ref, ua := refererHost(r), uaCategory(r)
+		record := s.mediaViewRecorder(r, f.Slug)
 		out = &statusHook{ResponseWriter: w, onStatus: func(code int) {
 			if code == http.StatusOK || (code == http.StatusPartialContent && fromStart) {
-				s.submitView(f.Slug, ref, ua, true)
+				record()
 			}
 		}}
 	}
@@ -193,7 +204,7 @@ func (h *statusHook) Unwrap() http.ResponseWriter { return h.ResponseWriter }
 // verifyFirstChunk authenticates the first chunk of an encrypted blob before
 // anything is sent. blobcrypt.NewReader only parses the header, so a wrong key
 // or a damaged blob used to fail on the first Read inside ServeContent, after
-// the 200 and a week of cache headers had gone out: the client got a cut-off
+// the 200 and its cache headers had gone out: the client got a cut-off
 // body that a cache may keep. Reading one byte decrypts chunk 0, which the
 // reader keeps cached, and the seek rewinds for ServeContent. Later chunks are
 // still checked only as they are read, but every chunk uses the same key, so
@@ -272,12 +283,24 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	allowCrossOriginEmbed(w)
 	if isPlaylist {
-		servePlaylist(w, r, rc, stat.Size, stat.ModTime, version)
+		// A browser that plays the HLS source never asks for /raw, so the
+		// playlist is what counts as the view: one full fetch per playback
+		// (a revalidation answers 304 and is not counted, like on /raw).
+		out := w
+		if r.Method == http.MethodGet {
+			record := s.mediaViewRecorder(r, f.Slug)
+			out = &statusHook{ResponseWriter: w, onStatus: func(code int) {
+				if code == http.StatusOK {
+					record()
+				}
+			}}
+		}
+		servePlaylist(out, r, rc, stat.Size, stat.ModTime, version)
 		return
 	}
 	w.Header().Set("Content-Type", "video/mp2t")
 	if v == version {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", hlsSegmentCacheControl)
 	} else {
 		// Unversioned: only a playlist from before segment URIs carried the
 		// version asks for this, so it gets no long-lived cache entry.
@@ -291,7 +314,7 @@ func (s *Server) handleHLS(w http.ResponseWriter, r *http.Request) {
 const maxPlaylistBytes = 1 << 20
 
 // servePlaylist serves an HLS playlist with every segment URI pinned to the
-// file's version (its id). Segments are cached for a year as immutable, but
+// file's version (its id). Segments are cached (once for a year as immutable), but
 // slugs are reused once a file is purged: under bare segment names, the next
 // file's playlist made browsers and CDNs play cached segments of the old one.
 //
@@ -353,7 +376,7 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	allowCrossOriginEmbed(w)
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", mediaCacheControl)
 	// Weak ETag from size+modtime → conditional requests get a 304.
 	w.Header().Set("ETag", fmt.Sprintf(`W/"t-%x-%x"`, stat.Size, stat.ModTime.Unix()))
 	http.ServeContent(w, r, f.Slug+".jpg", stat.ModTime, rc)
@@ -481,6 +504,44 @@ func (s *Server) handleDeleteByKey(w http.ResponseWriter, r *http.Request) {
 		`File moved to its owner's trash.</body>`))
 }
 
+// mediaViewRecorder returns the function that records one view of slug's media
+// (/raw or the HLS playlist) for request r. The request's headers are read
+// now, the view is recorded when the function is called.
+//
+// A request whose Referer is this instance itself comes from the share page,
+// the player page or the dashboard, not from another site. The share page has
+// already recorded the visit's real referrer, so such a request only bumps the
+// view counter: recorded with its own Referer, every visit added a second
+// breakdown row and the instance's own hostname led the referrer statistics.
+func (s *Server) mediaViewRecorder(r *http.Request, slug string) func() {
+	ref, ua := refererHost(r), uaCategory(r)
+	if ref != "" && ref == s.ownHost(r) {
+		return func() { s.countView(slug) }
+	}
+	return func() { s.submitView(slug, ref, ua, true) }
+}
+
+// ownHost is the hostname this instance is reached under, in the form
+// refererHost returns ("" when it cannot be told).
+func (s *Server) ownHost(r *http.Request) string {
+	u, err := neturl.Parse(s.publicBaseURL(r))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return normalizeReferrerHost(u.Hostname())
+}
+
+// countView bumps slug's public view counter without a breakdown entry.
+func (s *Server) countView(slug string) {
+	if s.views != nil {
+		s.views.addView(slug)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.store.RecordViews(ctx, []store.ViewDelta{{Slug: slug, Views: 1}})
+}
+
 // submitView records the analytics for a view: always the aggregated (referrer
 // host, UA category) breakdown, and the public views counter when
 // incrementCount is set. Normally it only bumps an in-memory counter that the
@@ -569,21 +630,8 @@ func isDangerousInline(mime string) bool {
 }
 
 // sanitizeFilename strips characters that could break the Content-Disposition
-// header or enable header/path injection.
+// header or enable header/path injection. It is upload.CleanFilename: names are
+// cleaned the same way when they are stored and when they are served.
 func sanitizeFilename(name string) string {
-	name = strings.ReplaceAll(name, "\\", "_")
-	name = strings.ReplaceAll(name, "/", "_")
-	name = strings.ReplaceAll(name, "\"", "_")
-	var b strings.Builder
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	out := strings.TrimSpace(b.String())
-	if out == "" {
-		return "file"
-	}
-	return out
+	return upload.CleanFilename(name)
 }

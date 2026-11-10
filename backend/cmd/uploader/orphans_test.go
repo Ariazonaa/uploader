@@ -86,7 +86,7 @@ func TestScanOrphansMeasuresGraceAtSnapshot(t *testing.T) {
 	b.put("ab/cd/young.png", snapshot.Add(-orphanGrace/2)) // an hour and a half old by now
 	b.put("ab/cd/after.png", snapshot.Add(time.Minute))
 
-	scanOrphans(context.Background(), fakeOrphanStore{keys: map[string]struct{}{"ab/cd/known.png": {}}}, b.st, snapshot)
+	scanOrphans(context.Background(), fakeOrphanStore{keys: map[string]struct{}{"ab/cd/known.png": {}}}, b.st, snapshot, false)
 
 	if b.has("ab/cd/orphan.png") {
 		t.Error("orphan older than the grace period at snapshot time survived")
@@ -121,7 +121,7 @@ func TestScanOrphansCollectsRenditionsOfMissingFiles(t *testing.T) {
 	b.put("hls/ab/seg.ts", old) // inside a shard directory, not a rendition
 
 	st := fakeOrphanStore{slugs: map[string]struct{}{"livevid": {}}}
-	scanOrphans(context.Background(), st, b.st, now)
+	scanOrphans(context.Background(), st, b.st, now, false)
 
 	for _, gone := range []string{
 		hls("gonevid") + "/index.m3u8", hls("abc") + "/seg000.ts",
@@ -149,7 +149,7 @@ func TestScanOrphansStopsWhenCancelled(t *testing.T) {
 	b.put("ab/cd/orphan.png", time.Now().Add(-48*time.Hour))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	scanOrphans(ctx, fakeOrphanStore{}, b.st, time.Now())
+	scanOrphans(ctx, fakeOrphanStore{}, b.st, time.Now(), false)
 	if !b.has("ab/cd/orphan.png") {
 		t.Fatal("a cancelled scan still deleted blobs")
 	}
@@ -182,7 +182,7 @@ func TestScanOrphansInBatches(t *testing.T) {
 
 	var queries, maxKeys int
 	st := fakeOrphanStore{keys: known, slugs: map[string]struct{}{"livevid": {}}, keyQueries: &queries, maxKeys: &maxKeys}
-	scanOrphans(context.Background(), st, b.st, now)
+	scanOrphans(context.Background(), st, b.st, now, false)
 
 	for i := 0; i < 7; i++ {
 		if !b.has(fmt.Sprintf("ab/cd/known%d.png", i)) {
@@ -198,4 +198,72 @@ func TestScanOrphansInBatches(t *testing.T) {
 	if queries < 7 || maxKeys > 2 {
 		t.Errorf("%d key queries of up to %d keys, want batches of at most 2", queries, maxKeys)
 	}
+}
+
+// A pass that finds most of the store orphaned (an empty or the wrong
+// database) deletes nothing, unless it is forced; a few orphans among many
+// referenced blobs are collected as before.
+func TestScanOrphansRefusesMassOrphans(t *testing.T) {
+	old := time.Now().Add(-48 * time.Hour)
+	hls := func(slug string) string { return upload.HLSPrefix(slug, upload.StorageKey(slug, ".mp4")) }
+	fill := func(b *blobTree, orphans, known int) map[string]struct{} {
+		keys := map[string]struct{}{}
+		for i := 0; i < orphans; i++ {
+			b.put(fmt.Sprintf("ab/cd/orphan%d.png", i), old)
+		}
+		for i := 0; i < known; i++ {
+			k := fmt.Sprintf("ab/cd/known%d.png", i)
+			b.put(k, old)
+			keys[k] = struct{}{}
+		}
+		b.put(hls("gonevid")+"/index.m3u8", old)
+		return keys
+	}
+	count := func(b *blobTree, n int) (left int) {
+		for i := 0; i < n; i++ {
+			if b.has(fmt.Sprintf("ab/cd/orphan%d.png", i)) {
+				left++
+			}
+		}
+		return left
+	}
+
+	t.Run("empty database", func(t *testing.T) {
+		b := newBlobTree(t)
+		fill(b, orphanMassMin, 0)
+		scanOrphans(context.Background(), fakeOrphanStore{}, b.st, time.Now(), false)
+		if left := count(b, orphanMassMin); left != orphanMassMin {
+			t.Fatalf("%d of %d blobs survived a scan against an empty database", left, orphanMassMin)
+		}
+		if !b.has(hls("gonevid") + "/index.m3u8") {
+			t.Fatal("a rendition was deleted by a refused scan")
+		}
+	})
+	t.Run("forced", func(t *testing.T) {
+		b := newBlobTree(t)
+		fill(b, orphanMassMin, 0)
+		scanOrphans(context.Background(), fakeOrphanStore{}, b.st, time.Now(), true)
+		if left := count(b, orphanMassMin); left != 0 || b.has(hls("gonevid")+"/index.m3u8") {
+			t.Fatalf("a forced scan left %d orphans (or the rendition) behind", left)
+		}
+	})
+	t.Run("minority", func(t *testing.T) {
+		b := newBlobTree(t)
+		keys := fill(b, orphanMassMin, 2*orphanMassMin)
+		scanOrphans(context.Background(), fakeOrphanStore{keys: keys}, b.st, time.Now(), false)
+		if left := count(b, orphanMassMin); left != 0 {
+			t.Fatalf("%d orphans survived although most blobs are referenced", left)
+		}
+	})
+	t.Run("more than a pass holds", func(t *testing.T) {
+		oldMax := orphanHoldMax
+		orphanHoldMax = 10
+		t.Cleanup(func() { orphanHoldMax = oldMax })
+		b := newBlobTree(t)
+		keys := fill(b, 20, 100)
+		scanOrphans(context.Background(), fakeOrphanStore{keys: keys}, b.st, time.Now(), false)
+		if left := count(b, 20); left != 20 {
+			t.Fatalf("%d of 20 orphans survived, want all: the pass could not hold them", left)
+		}
+	})
 }
